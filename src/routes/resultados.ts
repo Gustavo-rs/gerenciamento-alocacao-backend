@@ -1,8 +1,48 @@
 import { Router } from 'express';
 import { ResultadoAlocacaoSchema, ApiResponse } from '../types';
 import { z } from 'zod';
+import { pythonService } from '../services/pythonService';
 
 const router = Router();
+
+// GET /api/resultados/test-python - Testar integração Python
+router.get('/test-python', async (req, res) => {
+  try {
+    // Verificar se Python está disponível
+    const pythonDisponivel = await pythonService.verificarPython();
+    
+    if (!pythonDisponivel) {
+      return res.status(500).json({
+        success: false,
+        error: 'Python não está instalado ou disponível no PATH'
+      });
+    }
+
+    // Testar script
+    const scriptFuncionando = await pythonService.testarScript();
+    
+    if (!scriptFuncionando) {
+      return res.status(500).json({
+        success: false,
+        error: 'Script Python não está funcionando corretamente'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Integração Python funcionando perfeitamente!',
+      python_disponivel: pythonDisponivel,
+      script_funcionando: scriptFuncionando
+    });
+
+  } catch (error) {
+    console.error('Erro no teste Python:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Erro ao testar integração Python'
+    });
+  }
+});
 
 // GET /api/resultados - Listar todos os resultados
 router.get('/', async (req, res) => {
@@ -235,55 +275,45 @@ router.post('/executar/:projetoId', async (req, res) => {
       });
     }
 
-    // Algoritmo simples de alocação (pode ser melhorado)
-    const alocacoes = projeto.turmas.map((projetoTurma, index) => {
-      const turma = projetoTurma.turma;
-      
-      // Filtrar salas compatíveis
-      const salasCompativeis = projeto.salas
-        .map(ps => ps.sala)
-        .filter(sala => 
-          sala.status === 'ATIVA' &&
-          sala.capacidade_total >= turma.alunos &&
-          sala.cadeiras_especiais >= turma.esp_necessarias
-        );
+    // Preparar dados para o script Python
+    console.log('🔄 [RESULTADOS] Preparando dados para Python...');
+    const dadosParaPython = {
+      salas: projeto.salas.map(ps => ps.sala),
+      turmas: projeto.turmas.map(pt => pt.turma)
+    };
 
-      // Se não há salas compatíveis, usar a primeira sala disponível
-      const salaEscolhida = salasCompativeis.length > 0 
-        ? salasCompativeis[index % salasCompativeis.length]
-        : projeto.salas[index % projeto.salas.length].sala;
+    const parametrosPython = {
+      priorizar_capacidade,
+      priorizar_especiais,
+      priorizar_proximidade
+    };
 
-      // Calcular score de compatibilidade
-      let score = 0;
-      
-      if (priorizar_capacidade) {
-        // Penalizar diferença excessiva de capacidade
-        const diferencaCapacidade = Math.abs(salaEscolhida.capacidade_total - turma.alunos);
-        score += Math.max(0, 50 - diferencaCapacidade);
-      }
-
-      if (priorizar_especiais) {
-        // Bonus se tem cadeiras especiais suficientes
-        if (salaEscolhida.cadeiras_especiais >= turma.esp_necessarias) {
-          score += 30;
-        }
-      }
-
-      if (priorizar_proximidade) {
-        // Simulação de proximidade (pode ser melhorado com dados reais)
-        score += Math.random() * 20;
-      }
-
-      return {
-        sala_id: salaEscolhida.id,
-        turma_id: turma.id,
-        compatibilidade_score: Math.min(100, score),
-        observacoes: salasCompativeis.length === 0 ? 'Sala não atende todos os requisitos' : undefined
-      };
+    console.log('📊 [RESULTADOS] Dados preparados:', {
+      salasCount: dadosParaPython.salas.length,
+      turmasCount: dadosParaPython.turmas.length,
+      salasSample: dadosParaPython.salas.slice(0, 2),
+      turmasSample: dadosParaPython.turmas.slice(0, 2),
+      parametros: parametrosPython
     });
 
-    // Calcular score geral de otimização
-    const scoreOtimizacao = alocacoes.reduce((acc, alocacao) => acc + alocacao.compatibilidade_score, 0) / alocacoes.length;
+    // Executar algoritmo Python
+    console.log('🐍 [RESULTADOS] Chamando serviço Python...');
+    const resultadoPython = await pythonService.executarAlocacaoInteligente(
+      dadosParaPython,
+      parametrosPython
+    );
+    
+    console.log('📥 [RESULTADOS] Resultado do Python recebido:', resultadoPython);
+
+    if (!resultadoPython.success) {
+      return res.status(500).json({
+        success: false,
+        error: `Erro no algoritmo de alocação: ${resultadoPython.error}`
+      });
+    }
+
+    const alocacoes = resultadoPython.alocacoes || [];
+    const scoreOtimizacao = resultadoPython.score_otimizacao || 0;
 
     // Criar resultado no banco
     const resultado = await req.prisma.$transaction(async (prisma) => {

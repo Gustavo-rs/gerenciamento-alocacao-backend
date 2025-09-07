@@ -16,10 +16,12 @@ API REST para o sistema de gerenciamento de alocação de salas e turmas.
 ### Opção 1: Com Docker (Recomendado)
 - Docker 20+
 - Docker Compose 2+
+- Python 3.8+ (para algoritmo de alocação)
 
 ### Opção 2: Instalação Manual
 - Node.js 18+ 
 - PostgreSQL 12+
+- Python 3.8+ (para algoritmo de alocação)
 - npm ou yarn
 
 ## 🐳 Instalação com Docker (Recomendado)
@@ -97,7 +99,18 @@ npm run docker:full:build   # Rebuild da stack completa
    FRONTEND_URL=http://localhost:5173
    ```
 
-4. **Configurar banco de dados:**
+4. **Instalar Python (se não estiver instalado):**
+   ```bash
+   # Verificar se Python está instalado
+   python --version
+   # ou
+   python3 --version
+   
+   # Instalar dependências Python (atualmente não necessário)
+   pip install -r requirements.txt
+   ```
+
+5. **Configurar banco de dados:**
    ```bash
    # Gerar cliente Prisma
    npm run db:generate
@@ -140,6 +153,29 @@ Quando executando com Docker:
 - **PgAdmin** (interface web do PostgreSQL): `http://localhost:8080`
   - Email: `admin@admin.com`
   - Password: `admin123`
+
+## 🐍 Integração Python
+
+### Testar Algoritmo Python
+Para verificar se a integração Python está funcionando:
+
+```bash
+# Via API (com servidor rodando)
+curl http://localhost:3001/api/resultados/test-python
+
+# Ou testar script diretamente
+python scripts/alocacao_inteligente.py --dados '{"salas":[{"id":"1","nome":"Sala 1","capacidade_total":30,"status":"ATIVA","cadeiras_especiais":2}],"turmas":[{"id":"1","nome":"Turma 1","alunos":25,"esp_necessarias":1}]}' --parametros '{"priorizar_capacidade":true,"priorizar_especiais":true,"priorizar_proximidade":true}'
+```
+
+### Estrutura do Algoritmo Python
+- **Localização**: `scripts/alocacao_inteligente.py`
+- **Entrada**: JSON com dados de salas e turmas
+- **Saída**: JSON com alocações otimizadas e scores
+- **Algoritmo**: Otimização baseada em:
+  - Compatibilidade de capacidade
+  - Necessidades especiais
+  - Proximidade/localização
+  - Taxa de ocupação ótima
 
 ## 📚 API Endpoints
 

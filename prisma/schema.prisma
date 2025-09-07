@@ -1,0 +1,146 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Sala {
+  id               String @id @default(cuid())
+  id_sala          String @unique
+  nome             String
+  capacidade_total Int
+  localizacao      String
+  status           SalaStatus @default(ATIVA)
+  cadeiras_moveis  Int @default(0)
+  cadeiras_especiais Int @default(0)
+  created_at       DateTime @default(now())
+  updated_at       DateTime @updatedAt
+
+  // Relacionamentos
+  projetos         ProjetoSala[]
+  alocacoes        Alocacao[]
+
+  @@map("salas")
+}
+
+model Turma {
+  id               String @id @default(cuid())
+  id_turma         String @unique
+  nome             String
+  alunos           Int
+  duracao_min      Int
+  esp_necessarias  Int @default(0)
+  created_at       DateTime @default(now())
+  updated_at       DateTime @updatedAt
+
+  // Relacionamentos
+  projetos         ProjetoTurma[]
+  alocacoes        Alocacao[]
+
+  @@map("turmas")
+}
+
+model ProjetoAlocacao {
+  id               String @id @default(cuid())
+  id_projeto       String @unique
+  nome             String
+  descricao        String
+  status           ProjetoStatus @default(CONFIGURACAO)
+  data_criacao     DateTime @default(now())
+  ultima_alocacao  DateTime?
+  created_at       DateTime @default(now())
+  updated_at       DateTime @updatedAt
+
+  // Relacionamentos
+  salas            ProjetoSala[]
+  turmas           ProjetoTurma[]
+  resultados       ResultadoAlocacao[]
+
+  @@map("projetos_alocacao")
+}
+
+model ProjetoSala {
+  id         String @id @default(cuid())
+  projeto_id String
+  sala_id    String
+  created_at DateTime @default(now())
+
+  // Relacionamentos
+  projeto    ProjetoAlocacao @relation(fields: [projeto_id], references: [id], onDelete: Cascade)
+  sala       Sala @relation(fields: [sala_id], references: [id], onDelete: Cascade)
+
+  @@unique([projeto_id, sala_id])
+  @@map("projeto_salas")
+}
+
+model ProjetoTurma {
+  id         String @id @default(cuid())
+  projeto_id String
+  turma_id   String
+  created_at DateTime @default(now())
+
+  // Relacionamentos
+  projeto    ProjetoAlocacao @relation(fields: [projeto_id], references: [id], onDelete: Cascade)
+  turma      Turma @relation(fields: [turma_id], references: [id], onDelete: Cascade)
+
+  @@unique([projeto_id, turma_id])
+  @@map("projeto_turmas")
+}
+
+model ResultadoAlocacao {
+  id                    String @id @default(cuid())
+  projeto_id            String
+  score_otimizacao      Float
+  data_geracao          DateTime @default(now())
+  priorizar_capacidade  Boolean @default(true)
+  priorizar_especiais   Boolean @default(true)
+  priorizar_proximidade Boolean @default(true)
+  created_at            DateTime @default(now())
+
+  // Relacionamentos
+  projeto               ProjetoAlocacao @relation(fields: [projeto_id], references: [id], onDelete: Cascade)
+  alocacoes             Alocacao[]
+
+  @@map("resultados_alocacao")
+}
+
+model Alocacao {
+  id                     String @id @default(cuid())
+  resultado_id           String
+  sala_id                String
+  turma_id               String
+  compatibilidade_score  Float
+  observacoes            String?
+  created_at             DateTime @default(now())
+
+  // Relacionamentos
+  resultado              ResultadoAlocacao @relation(fields: [resultado_id], references: [id], onDelete: Cascade)
+  sala                   Sala @relation(fields: [sala_id], references: [id])
+  turma                  Turma @relation(fields: [turma_id], references: [id])
+
+  @@map("alocacoes")
+}
+
+enum SalaStatus {
+  ATIVA
+  INATIVA
+  MANUTENCAO
+
+  @@map("sala_status")
+}
+
+enum ProjetoStatus {
+  CONFIGURACAO
+  PRONTO
+  PROCESSANDO
+  ALOCADO
+  CONCLUIDO
+
+  @@map("projeto_status")
+}

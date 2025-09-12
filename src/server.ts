@@ -9,6 +9,7 @@ import salasRoutes from './routes/salas';
 import turmasRoutes from './routes/turmas';
 import projetosRoutes from './routes/projetos';
 import resultadosRoutes from './routes/resultados';
+import alocacoesRoutes from './routes/alocacoes';
 
 const app = express();
 const prisma = new PrismaClient();
@@ -34,6 +35,7 @@ app.use('/api/salas', salasRoutes);
 app.use('/api/turmas', turmasRoutes);
 app.use('/api/projetos', projetosRoutes);
 app.use('/api/resultados', resultadosRoutes);
+app.use('/api/alocacoes', alocacoesRoutes);
 
 // Rota de health check
 app.get('/health', (req, res) => {

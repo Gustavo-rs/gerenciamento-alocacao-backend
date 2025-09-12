@@ -24,7 +24,8 @@ model Sala {
 
   // Relacionamentos
   projetos         ProjetoSala[]
-  alocacoes        Alocacao[]
+  alocacoes_resultado AlocacaoResultado[]
+  alocacoes        AlocacaoSala[]
 
   @@map("salas")
 }
@@ -41,7 +42,7 @@ model Turma {
 
   // Relacionamentos
   projetos         ProjetoTurma[]
-  alocacoes        Alocacao[]
+  alocacoes_resultado AlocacaoResultado[]
 
   @@map("turmas")
 }
@@ -105,12 +106,13 @@ model ResultadoAlocacao {
 
   // Relacionamentos
   projeto               ProjetoAlocacao @relation(fields: [projeto_id], references: [id], onDelete: Cascade)
-  alocacoes             Alocacao[]
+  alocacoes             AlocacaoResultado[]
 
   @@map("resultados_alocacao")
 }
 
-model Alocacao {
+// Renomear a antiga tabela de alocações (dos resultados)
+model AlocacaoResultado {
   id                     String @id @default(cuid())
   resultado_id           String
   sala_id                String
@@ -124,7 +126,35 @@ model Alocacao {
   sala                   Sala @relation(fields: [sala_id], references: [id])
   turma                  Turma @relation(fields: [turma_id], references: [id])
 
-  @@map("alocacoes")
+  @@map("alocacoes_resultado")
+}
+
+// Nova estrutura de alocações principais
+model AlocacaoPrincipal {
+  id          String @id @default(cuid())
+  nome        String
+  descricao   String
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  // Relacionamentos
+  salas       AlocacaoSala[]
+
+  @@map("alocacoes_principais")
+}
+
+model AlocacaoSala {
+  id           String @id @default(cuid())
+  alocacao_id  String
+  sala_id      String
+  created_at   DateTime @default(now())
+
+  // Relacionamentos
+  alocacao     AlocacaoPrincipal @relation(fields: [alocacao_id], references: [id], onDelete: Cascade)
+  sala         Sala @relation(fields: [sala_id], references: [id], onDelete: Cascade)
+
+  @@unique([alocacao_id, sala_id])
+  @@map("alocacao_salas")
 }
 
 enum SalaStatus {

@@ -43,6 +43,7 @@ model Turma {
   // Relacionamentos
   projetos         ProjetoTurma[]
   alocacoes_resultado AlocacaoResultado[]
+  horarios         HorarioTurma[]
 
   @@map("turmas")
 }
@@ -139,6 +140,7 @@ model AlocacaoPrincipal {
 
   // Relacionamentos
   salas       AlocacaoSala[]
+  horarios    Horario[]
 
   @@map("alocacoes_principais")
 }
@@ -155,6 +157,55 @@ model AlocacaoSala {
 
   @@unique([alocacao_id, sala_id])
   @@map("alocacao_salas")
+}
+
+// Horários (sub-alocações)
+model Horario {
+  id           String @id @default(cuid())
+  alocacao_id  String
+  dia_semana   DiaSemana @default(SEGUNDA)
+  periodo      Periodo @default(MATUTINO)
+  created_at   DateTime @default(now())
+
+  // Relacionamentos
+  alocacao     AlocacaoPrincipal @relation(fields: [alocacao_id], references: [id], onDelete: Cascade)
+  turmas       HorarioTurma[]
+
+  @@unique([alocacao_id, dia_semana, periodo])
+  @@map("horarios")
+}
+
+model HorarioTurma {
+  id          String @id @default(cuid())
+  horario_id  String
+  turma_id    String
+  created_at  DateTime @default(now())
+
+  // Relacionamentos
+  horario     Horario @relation(fields: [horario_id], references: [id], onDelete: Cascade)
+  turma       Turma @relation(fields: [turma_id], references: [id], onDelete: Cascade)
+
+  @@unique([horario_id, turma_id])
+  @@map("horario_turmas")
+}
+
+enum DiaSemana {
+  SEGUNDA
+  TERCA
+  QUARTA
+  QUINTA
+  SEXTA
+  SABADO
+
+  @@map("dia_semana")
+}
+
+enum Periodo {
+  MATUTINO
+  VESPERTINO
+  NOTURNO
+
+  @@map("periodo")
 }
 
 enum SalaStatus {

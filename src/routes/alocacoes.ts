@@ -20,6 +20,15 @@ router.get('/', async (req, res) => {
           include: {
             sala: true
           }
+        },
+        horarios: {
+          include: {
+            turmas: {
+              include: {
+                turma: true
+              }
+            }
+          }
         }
       },
       orderBy: {
@@ -51,6 +60,15 @@ router.get('/:id', async (req, res) => {
         salas: {
           include: {
             sala: true
+          }
+        },
+        horarios: {
+          include: {
+            turmas: {
+              include: {
+                turma: true
+              }
+            }
           }
         }
       }
@@ -299,6 +317,78 @@ router.delete('/:id/salas/:sala_id', async (req, res) => {
     });
   } catch (error) {
     console.error('Erro ao remover sala da alocação:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Erro interno do servidor'
+    });
+  }
+});
+
+// POST /api/alocacoes/:id/horarios - Adicionar horário à alocação
+router.post('/:id/horarios', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { dia_semana, periodo } = req.body;
+
+    if (!dia_semana || !periodo) {
+      return res.status(400).json({
+        success: false,
+        error: 'Dia da semana e período são obrigatórios'
+      });
+    }
+
+    // Verificar se a alocação existe
+    const alocacao = await prisma.alocacaoPrincipal.findUnique({
+      where: { id }
+    });
+
+    if (!alocacao) {
+      return res.status(404).json({
+        success: false,
+        error: 'Alocação não encontrada'
+      });
+    }
+
+    // Verificar se já existe horário para esse dia/período
+    const existingHorario = await prisma.horario.findUnique({
+      where: {
+        alocacao_id_dia_semana_periodo: {
+          alocacao_id: id,
+          dia_semana,
+          periodo
+        }
+      }
+    });
+
+    if (existingHorario) {
+      return res.status(400).json({
+        success: false,
+        error: 'Já existe um horário para este dia e período'
+      });
+    }
+
+    // Criar o horário
+    const horario = await prisma.horario.create({
+      data: {
+        alocacao_id: id,
+        dia_semana,
+        periodo
+      },
+      include: {
+        turmas: {
+          include: {
+            turma: true
+          }
+        }
+      }
+    });
+
+    res.status(201).json({
+      success: true,
+      data: horario
+    });
+  } catch (error) {
+    console.error('Erro ao criar horário:', error);
     res.status(500).json({
       success: false,
       error: 'Erro interno do servidor'

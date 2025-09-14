@@ -181,19 +181,47 @@ router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Primeiro, excluir as associações com salas
-    await prisma.alocacaoSala.deleteMany({
-      where: { alocacao_id: id }
+    // Verificar se a alocação existe e contar elementos relacionados para o log
+    const alocacao = await prisma.alocacaoPrincipal.findUnique({
+      where: { id },
+      include: {
+        salas: true,
+        horarios: {
+          include: {
+            turmas: true
+          }
+        }
+      }
     });
 
-    // Depois, excluir a alocação
+    if (!alocacao) {
+      return res.status(404).json({
+        success: false,
+        error: 'Alocação não encontrada'
+      });
+    }
+
+    // Contar elementos que serão deletados
+    const salasCount = alocacao.salas.length;
+    const horariosCount = alocacao.horarios.length;
+    const turmasCount = alocacao.horarios.reduce((acc, h) => acc + h.turmas.length, 0);
+
+    console.log(`Excluindo alocação "${alocacao.nome}" e seus relacionamentos:`);
+    console.log(`- ${salasCount} salas associadas`);
+    console.log(`- ${horariosCount} horários`);
+    console.log(`- ${turmasCount} turmas associadas aos horários`);
+
+    // O Prisma automaticamente excluirá em cascata:
+    // - AlocacaoSala (pela foreign key com onDelete: Cascade)
+    // - Horario (pela foreign key com onDelete: Cascade)
+    // - HorarioTurma (pela foreign key de Horario com onDelete: Cascade)
     await prisma.alocacaoPrincipal.delete({
       where: { id }
     });
 
     res.json({
       success: true,
-      message: 'Alocação excluída com sucesso'
+      message: `Alocação excluída com sucesso! Foram removidos: ${salasCount} salas, ${horariosCount} horários e ${turmasCount} turmas associadas.`
     });
   } catch (error) {
     console.error('Erro ao excluir alocação:', error);

@@ -15,7 +15,6 @@ export const TurmaSchema = z.object({
   id_turma: z.string().min(1, 'ID da turma é obrigatório'),
   nome: z.string().min(1, 'Nome é obrigatório'),
   alunos: z.number().min(1, 'Número de alunos deve ser maior que 0'),
-  duracao_min: z.number().min(1, 'Duração deve ser maior que 0'),
   esp_necessarias: z.number().min(0).default(0)
 });
 

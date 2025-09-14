@@ -133,7 +133,6 @@ router.put('/:id', async (req, res) => {
     
     if (updateData.nome !== undefined) fieldsToUpdate.nome = updateData.nome;
     if (updateData.alunos !== undefined) fieldsToUpdate.alunos = updateData.alunos;
-    if (updateData.duracao_min !== undefined) fieldsToUpdate.duracao_min = updateData.duracao_min;
     if (updateData.esp_necessarias !== undefined) fieldsToUpdate.esp_necessarias = updateData.esp_necessarias;
 
     const turmaAtualizada = await req.prisma.turma.update({

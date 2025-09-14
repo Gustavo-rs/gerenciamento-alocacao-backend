@@ -83,7 +83,7 @@ router.post('/:alocacao_id', async (req, res) => {
         capacidade_total: as.sala.capacidade_total,
         localizacao: as.sala.localizacao,
         status: as.sala.status,
-        cadeiras_moveis: as.sala.cadeiras_moveis > 0,
+        cadeiras_moveis: as.sala.cadeiras_moveis,
         cadeiras_especiais: as.sala.cadeiras_especiais
       }));
 

@@ -99,6 +99,18 @@ router.post('/', async (req, res) => {
   try {
     const validatedData = AlocacaoSchema.parse(req.body);
 
+    // Verificar se já existe uma alocação com o mesmo nome
+    const existingAlocacao = await prisma.alocacaoPrincipal.findFirst({
+      where: { nome: validatedData.nome }
+    });
+
+    if (existingAlocacao) {
+      return res.status(400).json({
+        success: false,
+        error: 'Já existe uma alocação com este nome'
+      });
+    }
+
     const alocacao = await prisma.alocacaoPrincipal.create({
       data: {
         nome: validatedData.nome,

@@ -70,14 +70,26 @@ router.post('/', async (req, res) => {
     const validatedData = SalaSchema.parse(req.body);
 
     // Verificar se já existe uma sala com o mesmo id_sala
-    const existingSala = await req.prisma.sala.findUnique({
+    const existingSalaById = await req.prisma.sala.findUnique({
       where: { id_sala: validatedData.id_sala }
     });
 
-    if (existingSala) {
+    if (existingSalaById) {
       return res.status(400).json({
         success: false,
         error: 'Já existe uma sala com este ID'
+      });
+    }
+
+    // Verificar se já existe uma sala com o mesmo nome
+    const existingSalaByName = await req.prisma.sala.findFirst({
+      where: { nome: validatedData.nome }
+    });
+
+    if (existingSalaByName) {
+      return res.status(400).json({
+        success: false,
+        error: 'Já existe uma sala com este nome'
       });
     }
 

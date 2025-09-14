@@ -7,7 +7,7 @@ export const SalaSchema = z.object({
   capacidade_total: z.number().min(1, 'Capacidade deve ser maior que 0'),
   localizacao: z.string().min(1, 'Localização é obrigatória'),
   status: z.enum(['ATIVA', 'INATIVA', 'MANUTENCAO']).default('ATIVA'),
-  cadeiras_moveis: z.number().min(0).default(0),
+  cadeiras_moveis: z.boolean().default(false),
   cadeiras_especiais: z.number().min(0).default(0)
 });
 

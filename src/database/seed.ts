@@ -14,7 +14,7 @@ async function main() {
         capacidade_total: 35,
         localizacao: 'Bloco A - 2º andar',
         status: 'ATIVA',
-        cadeiras_moveis: 35,
+        cadeiras_moveis: true,
         cadeiras_especiais: 2
       }
     }),
@@ -25,7 +25,7 @@ async function main() {
         capacidade_total: 40,
         localizacao: 'Bloco B - 1º andar',
         status: 'ATIVA',
-        cadeiras_moveis: 0,
+        cadeiras_moveis: false,
         cadeiras_especiais: 0
       }
     }),
@@ -36,7 +36,7 @@ async function main() {
         capacidade_total: 28,
         localizacao: 'Bloco A - 1º andar',
         status: 'ATIVA',
-        cadeiras_moveis: 28,
+        cadeiras_moveis: true,
         cadeiras_especiais: 1
       }
     }),
@@ -47,7 +47,7 @@ async function main() {
         capacidade_total: 50,
         localizacao: 'Bloco C - 3º andar',
         status: 'ATIVA',
-        cadeiras_moveis: 50,
+        cadeiras_moveis: true,
         cadeiras_especiais: 3
       }
     })

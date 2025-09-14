@@ -99,6 +99,20 @@ router.post('/:id/turmas', async (req, res) => {
       });
     }
 
+    // Verificar se já existe uma turma com o mesmo nome neste horário
+    const turmasNoHorario = await prisma.horarioTurma.findMany({
+      where: { horario_id: id },
+      include: { turma: true }
+    });
+
+    const turmaComMesmoNome = turmasNoHorario.find(ht => ht.turma.nome === turma.nome);
+    if (turmaComMesmoNome) {
+      return res.status(400).json({
+        success: false,
+        error: `Já existe uma turma com o nome "${turma.nome}" neste horário`
+      });
+    }
+
     // Criar a associação
     await prisma.horarioTurma.create({
       data: {

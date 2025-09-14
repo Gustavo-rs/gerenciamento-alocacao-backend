@@ -262,6 +262,7 @@ class AlocacaoInteligenteMLA:
         turmas_alocadas = set()
         salas_usadas = set()
         turmas_nao_alocadas = []
+        transferencias_cadeiras = []  # Rastrear movimentação de cadeiras
         
         # Ordenar turmas por número de alunos (maiores primeiro)
         turmas_ordenadas = sorted(self.turmas, key=lambda t: t["alunos"], reverse=True)
@@ -270,6 +271,23 @@ class AlocacaoInteligenteMLA:
         salas_ativas = [s for s in self.salas if s["status"].upper() == "ATIVA"]
         salas_ordenadas = sorted(salas_ativas, key=lambda s: s["capacidade_total"], reverse=True)
         
+        # Mapear salas com cadeiras móveis (cadeiras que podem ser emprestadas)
+        cadeiras_por_sala = {}
+        for s in salas_ativas:
+            # Verificar se a sala tem cadeiras móveis (boolean)
+            tem_cadeiras_moveis = bool(s.get("cadeiras_moveis", False))
+                
+            # Se a sala tem cadeiras móveis, toda sua capacidade pode ser emprestada
+            if tem_cadeiras_moveis:
+                cadeiras_por_sala[s["id"]] = {
+                    "nome": s["nome"],
+                    "capacidade_total": s["capacidade_total"],
+                    "cadeiras_disponiveis": s["capacidade_total"],  # Inicialmente todas disponíveis
+                    "tem_moveis": True
+                }
+        
+        total_cadeiras_moveis = sum(info["cadeiras_disponiveis"] for info in cadeiras_por_sala.values())
+        
         for turma in turmas_ordenadas:
             melhor_sala = None
             melhor_score = -1
@@ -277,21 +295,43 @@ class AlocacaoInteligenteMLA:
             for sala in salas_ordenadas:
                 if sala["id"] in salas_usadas:
                     continue
-                    
-                # Verificar se a sala pode acomodar a turma
-                if sala["capacidade_total"] < turma["alunos"]:
+                
+                # Calcular capacidade efetiva (fixa + móveis emprestadas de outras salas)
+                capacidade_fixa = sala["capacidade_total"]
+                
+                # Calcular cadeiras disponíveis para empréstimo (de outras salas com móveis)
+                cadeiras_emprestadas_disponiveis = sum(
+                    info["cadeiras_disponiveis"] 
+                    for sala_id, info in cadeiras_por_sala.items() 
+                    if sala_id != sala["id"] and sala_id not in salas_usadas and info["cadeiras_disponiveis"] > 0
+                )
+                
+                # Capacidade efetiva = própria capacidade + até 5 cadeiras emprestadas
+                capacidade_efetiva = capacidade_fixa + min(5, cadeiras_emprestadas_disponiveis)
+                
+                # Verificar se pode acomodar com capacidade efetiva
+                if capacidade_efetiva < turma["alunos"]:
                     continue
                     
                 # Verificar cadeiras especiais
                 if sala["cadeiras_especiais"] < turma["esp_necessarias"]:
                     continue
                 
-                # Calcular score simples (ocupação próxima a 85%)
-                ocupacao = turma["alunos"] / sala["capacidade_total"]
-                score = max(0, 1 - abs(ocupacao - 0.85))
-                if ocupacao == 1.0 and sala["cadeiras_especiais"] == turma["esp_necessarias"]:
+                # Calcular score baseado na capacidade efetiva
+                ocupacao_fixa = turma["alunos"] / capacidade_fixa
+                ocupacao_efetiva = turma["alunos"] / capacidade_efetiva
+                
+                # Usar ocupação efetiva para score, mas penalizar uso de móveis
+                score = max(0, 1 - abs(ocupacao_efetiva - 0.85))
+                
+                # Se precisar de cadeiras móveis, aplicar pequena penalização
+                cadeiras_necessarias = max(0, turma["alunos"] - capacidade_fixa)
+                if cadeiras_necessarias > 0:
+                    score *= 0.9  # 10% de penalização por usar móveis
+                
+                # Match perfeito sem móveis
+                if ocupacao_fixa == 1.0 and sala["cadeiras_especiais"] == turma["esp_necessarias"]:
                     score = 1.0
-
                                 
                 # Bônus por atender exatamente as cadeiras especiais
                 if sala["cadeiras_especiais"] >= turma["esp_necessarias"]:
@@ -304,11 +344,56 @@ class AlocacaoInteligenteMLA:
                     melhor_sala = sala
             
             if melhor_sala:
-                ocupacao = turma["alunos"] / melhor_sala["capacidade_total"]
+                # Calcular detalhes da alocação
+                capacidade_fixa = melhor_sala["capacidade_total"]
+                cadeiras_necessarias = max(0, turma["alunos"] - capacidade_fixa)
+                ocupacao_fixa = turma["alunos"] / capacidade_fixa
                 
                 # Explicar como foi calculado o score
-                score_base = max(0, 1 - abs(ocupacao - 0.85))
-                obs_detalhes = f"Ocupacao: {ocupacao:.1%} (score base: {score_base:.2f})"
+                score_base = max(0, 1 - abs(ocupacao_fixa - 0.85))
+                obs_detalhes = f"Ocupacao: {ocupacao_fixa:.1%} (score base: {score_base:.2f})"
+                
+                # Informar sobre uso de cadeiras móveis e rastrear origem
+                if cadeiras_necessarias > 0:
+                    # Determinar de onde vêm as cadeiras (priorizar salas com mais cadeiras disponíveis)
+                    origem_cadeiras = []
+                    cadeiras_restantes = cadeiras_necessarias
+                    
+                    # Ordenar salas por número de cadeiras disponíveis (mais cadeiras primeiro)
+                    # Excluir salas já usadas e a própria sala destino
+                    salas_ordenadas_cadeiras = sorted(
+                        [(sala_id, info) for sala_id, info in cadeiras_por_sala.items() 
+                         if info["cadeiras_disponiveis"] > 0 and sala_id not in salas_usadas and sala_id != melhor_sala["id"]],
+                        key=lambda x: x[1]["cadeiras_disponiveis"], 
+                        reverse=True
+                    )
+                    
+                    for sala_origem_id, info_origem in salas_ordenadas_cadeiras:
+                        if cadeiras_restantes <= 0:
+                            break
+                            
+                        cadeiras_desta_sala = min(cadeiras_restantes, info_origem["cadeiras_disponiveis"])
+                        origem_cadeiras.append({
+                            "sala_origem": info_origem["nome"],
+                            "quantidade": cadeiras_desta_sala
+                        })
+                        
+                        # Atualizar disponibilidade
+                        cadeiras_por_sala[sala_origem_id]["cadeiras_disponiveis"] -= cadeiras_desta_sala
+                        cadeiras_restantes -= cadeiras_desta_sala
+                    
+                    # Registrar transferência
+                    transferencia = {
+                        "sala_destino": melhor_sala["nome"],
+                        "turma": turma["nome"],
+                        "total_cadeiras": cadeiras_necessarias,
+                        "origens": origem_cadeiras
+                    }
+                    transferencias_cadeiras.append(transferencia)
+                    
+                    # Criar descrição das origens
+                    origem_desc = ", ".join([f"{o['quantidade']} de {o['sala_origem']}" for o in origem_cadeiras])
+                    obs_detalhes += f", +{cadeiras_necessarias} moveis ({origem_desc}) → cap. efetiva: {capacidade_fixa + cadeiras_necessarias}"
                 
                 if melhor_sala["cadeiras_especiais"] == turma["esp_necessarias"]:
                     obs_detalhes += f", Match exato especiais (+10%)"
@@ -323,6 +408,12 @@ class AlocacaoInteligenteMLA:
                 })
                 turmas_alocadas.add(turma["id"])
                 salas_usadas.add(melhor_sala["id"])
+                
+                # Se a sala usada tem cadeiras móveis, reduzir sua disponibilidade
+                if melhor_sala["id"] in cadeiras_por_sala:
+                    cadeiras_ocupadas = turma["alunos"]
+                    cadeiras_restantes = max(0, cadeiras_por_sala[melhor_sala["id"]]["capacidade_total"] - cadeiras_ocupadas)
+                    cadeiras_por_sala[melhor_sala["id"]]["cadeiras_disponiveis"] = cadeiras_restantes
                 print(f"✅ [PYTHON] Turma '{turma['nome']}' alocada na sala '{melhor_sala['nome']}' (score: {melhor_score:.2f})", file=sys.stderr)
             else:
                 motivo = self._analisar_motivo_nao_alocacao(turma)
@@ -339,7 +430,15 @@ class AlocacaoInteligenteMLA:
         salas_ativas = [s for s in self.salas if s["status"].upper() == "ATIVA"]
         den = max(1, min(len(self.turmas), len(salas_ativas)))
         score_total = len(alocacoes_simples) / den if den > 0 else 0
-        return alocacoes_simples, score_total, turmas_nao_alocadas
+        
+        # Log das transferências de cadeiras para debug
+        if transferencias_cadeiras:
+            print(f"📋 [PYTHON] Transferências de cadeiras realizadas:", file=sys.stderr)
+            for t in transferencias_cadeiras:
+                origem_str = ", ".join([f"{o['quantidade']} de {o['sala_origem']}" for o in t['origens']])
+                print(f"   → {t['sala_destino']} ({t['turma']}): {t['total_cadeiras']} cadeiras ({origem_str})", file=sys.stderr)
+        
+        return alocacoes_simples, score_total, turmas_nao_alocadas, transferencias_cadeiras
 
     def otimizar_alocacoes(self):
         """Executa otimização global das alocações"""
@@ -382,7 +481,8 @@ class AlocacaoInteligenteMLA:
                     best_assign = salas_perm
         except Exception as e:
             print(f"⚠️ [PYTHON] Erro na otimizacao ML: {e}. Usando algoritmo simples.", file=sys.stderr)
-            return self._algoritmo_simples_fallback()
+            alocacoes, score, turmas_nao_alocadas, transferencias = self._algoritmo_simples_fallback()
+            return alocacoes, score, turmas_nao_alocadas
         
         alocacoes_otimas = []
         turmas_alocadas = set()
@@ -439,7 +539,8 @@ class AlocacaoInteligenteMLA:
         else:
             # ML não conseguiu encontrar solução, usar algoritmo simples
             print("⚠️ [PYTHON] ML nao encontrou solucoes viaveis. Usando algoritmo simples.", file=sys.stderr)
-            return self._algoritmo_simples_fallback()
+            alocacoes, score, turmas_nao_alocadas, transferencias = self._algoritmo_simples_fallback()
+            return alocacoes, score, turmas_nao_alocadas
 
     def _analisar_motivo_nao_alocacao(self, turma):
         """Analisa por que uma turma nao foi alocada"""
@@ -548,11 +649,12 @@ class AlocacaoInteligenteMLA:
             # Se o treinamento falhou completamente, usar algoritmo simples direto
             if acuracia == 0.0 or self.df is None or self.df.empty:
                 print("🔄 [PYTHON] ML falhou completamente, usando algoritmo simples direto", file=sys.stderr)
-                alocacoes, score, turmas_nao_alocadas = self._algoritmo_simples_fallback()
+                alocacoes, score, turmas_nao_alocadas, transferencias_cadeiras = self._algoritmo_simples_fallback()
                 acuracia = 0.5  # Acurácia estimada para algoritmo simples
             else:
                 # Otimizar alocações com ML
                 alocacoes, score, turmas_nao_alocadas = self.otimizar_alocacoes()
+                transferencias_cadeiras = []  # ML não rastreia transferências ainda
             
             # Calcular estatísticas com denominador correto
             total_turmas = len(self.turmas)
@@ -580,7 +682,8 @@ class AlocacaoInteligenteMLA:
                     "salas_ativas": total_salas_ativas,
                     "turmas_vs_salas": f"{total_turmas} turmas para {total_salas_ativas} salas",
                     "max_matches_possiveis": den
-                }
+                },
+                "transferencias_cadeiras": transferencias_cadeiras
             }
             
         except Exception as e:

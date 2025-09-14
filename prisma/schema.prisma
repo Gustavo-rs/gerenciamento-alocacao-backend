@@ -17,7 +17,7 @@ model Sala {
   capacidade_total Int
   localizacao      String
   status           SalaStatus @default(ATIVA)
-  cadeiras_moveis  Int @default(0)
+  cadeiras_moveis  Boolean @default(false)
   cadeiras_especiais Int @default(0)
   created_at       DateTime @default(now())
   updated_at       DateTime @updatedAt

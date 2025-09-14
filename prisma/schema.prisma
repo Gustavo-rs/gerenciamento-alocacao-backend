@@ -26,6 +26,7 @@ model Sala {
   projetos         ProjetoSala[]
   alocacoes_resultado AlocacaoResultado[]
   alocacoes        AlocacaoSala[]
+  alocacoes_horario AlocacaoHorarioItem[]
 
   @@map("salas")
 }
@@ -44,6 +45,7 @@ model Turma {
   projetos         ProjetoTurma[]
   alocacoes_resultado AlocacaoResultado[]
   horarios         HorarioTurma[]
+  alocacoes_horario AlocacaoHorarioItem[]
 
   @@map("turmas")
 }
@@ -141,6 +143,7 @@ model AlocacaoPrincipal {
   // Relacionamentos
   salas       AlocacaoSala[]
   horarios    Horario[]
+  resultados  ResultadoAlocacaoHorario[]
 
   @@map("alocacoes_principais")
 }
@@ -170,6 +173,7 @@ model Horario {
   // Relacionamentos
   alocacao     AlocacaoPrincipal @relation(fields: [alocacao_id], references: [id], onDelete: Cascade)
   turmas       HorarioTurma[]
+  resultados   ResultadoAlocacaoHorario[]
 
   @@unique([alocacao_id, dia_semana, periodo])
   @@map("horarios")
@@ -187,6 +191,49 @@ model HorarioTurma {
 
   @@unique([horario_id, turma_id])
   @@map("horario_turmas")
+}
+
+// Resultados da alocação inteligente por horário
+model ResultadoAlocacaoHorario {
+  id                    String @id @default(cuid())
+  alocacao_id           String
+  horario_id            String
+  score_otimizacao      Float
+  acuracia_modelo       Float @default(0)
+  data_geracao          DateTime @default(now())
+  priorizar_capacidade  Boolean @default(true)
+  priorizar_especiais   Boolean @default(true)
+  priorizar_proximidade Boolean @default(true)
+  analise_detalhada     String // JSON
+  debug_info            String // JSON
+  created_at            DateTime @default(now())
+
+  // Relacionamentos
+  alocacao              AlocacaoPrincipal @relation(fields: [alocacao_id], references: [id], onDelete: Cascade)
+  horario               Horario @relation(fields: [horario_id], references: [id], onDelete: Cascade)
+  alocacoes             AlocacaoHorarioItem[]
+
+  @@unique([alocacao_id, horario_id])
+  @@map("resultados_alocacao_horario")
+}
+
+// Itens específicos da alocação por horário
+model AlocacaoHorarioItem {
+  id                     String @id @default(cuid())
+  resultado_id           String
+  sala_id                String
+  turma_id               String
+  compatibilidade_score  Float
+  observacoes            String?
+  created_at             DateTime @default(now())
+
+  // Relacionamentos
+  resultado              ResultadoAlocacaoHorario @relation(fields: [resultado_id], references: [id], onDelete: Cascade)
+  sala                   Sala @relation(fields: [sala_id], references: [id])
+  turma                  Turma @relation(fields: [turma_id], references: [id])
+
+  @@unique([resultado_id, sala_id, turma_id])
+  @@map("alocacao_horario_itens")
 }
 
 enum DiaSemana {

@@ -11,6 +11,7 @@ import projetosRoutes from './routes/projetos';
 import resultadosRoutes from './routes/resultados';
 import alocacoesRoutes from './routes/alocacoes';
 import horariosRoutes from './routes/horarios';
+import alocacaoInteligenteRoutes from './routes/alocacao-inteligente';
 
 const app = express();
 const prisma = new PrismaClient();
@@ -38,6 +39,7 @@ app.use('/api/projetos', projetosRoutes);
 app.use('/api/resultados', resultadosRoutes);
 app.use('/api/alocacoes', alocacoesRoutes);
 app.use('/api/horarios', horariosRoutes);
+app.use('/api/alocacao-inteligente', alocacaoInteligenteRoutes);
 
 // Rota de health check
 app.get('/health', (req, res) => {

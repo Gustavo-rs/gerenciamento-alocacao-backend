@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+import sys
+import io
+
+# Forçar encoding UTF-8 para stdout/stderr
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 """
 Algoritmo Inteligente de Alocação com Machine Learning
 Integrado com backend Node.js para sistema de gerenciamento de alocação
@@ -7,7 +13,6 @@ Autor: Sistema de Alocação Inteligente
 """
 
 import json
-import sys
 import argparse
 from itertools import permutations
 from collections import Counter
@@ -127,7 +132,7 @@ class AlocacaoInteligenteMLA:
             self.df = self.build_pair_features()
             
             if self.df.empty:
-                print("❌ [PYTHON] Nenhum par turma-sala válido encontrado", file=sys.stderr)
+                print("❌ [PYTHON] Nenhum par turma-sala valido encontrado", file=sys.stderr)
                 raise Exception("Nenhum par turma-sala válido encontrado")
             
             feature_cols = [
@@ -174,7 +179,7 @@ class AlocacaoInteligenteMLA:
                     # combinado (0..1) e com clamp
                     proba_comb = (0.4 * proba_ml) + (0.6 * score_ocupacao)
                     self.df["proba_bom"] = np.clip(proba_comb, 0.0, 1.0)
-                    print(f"✅ [PYTHON] Probabilidades combinadas ML(40%)+ocupação(60%) calculadas para {len(X)} pares", file=sys.stderr)
+                    print(f"✅ [PYTHON] Probabilidades combinadas ML(40%)+ocupacao(60%) calculadas para {len(X)} pares", file=sys.stderr)
                     
                     # --- Regra de "match perfeito" (força 100%) ---
                     # perfeição = ocupa 100% + sem déficit de especiais + sem déficit de capacidade
@@ -192,7 +197,7 @@ class AlocacaoInteligenteMLA:
                     self.df.loc[mask_perfeito, "match_perfeito"] = True
                     # --- fim do bloco ---
                 else:
-                    print(f"⚠️ [PYTHON] Apenas uma classe detectada, usando score de ocupação", file=sys.stderr)
+                    print(f"⚠️ [PYTHON] Apenas uma classe detectada, usando score de ocupacao", file=sys.stderr)
                     self.df["proba_ml"] = 0.0
                     self.df["proba_bom"] = self.df["score_ocupacao"]
                     
@@ -232,19 +237,19 @@ class AlocacaoInteligenteMLA:
                 # --- fim do bloco ---
             
             accuracy = self.clf.score(X_test, y_test)
-            print(f"🎯 [PYTHON] Modelo treinado com acurácia: {accuracy:.2%}", file=sys.stderr)
+            print(f"🎯 [PYTHON] Modelo treinado com acuracia: {accuracy:.2%}", file=sys.stderr)
             return accuracy
             
         except Exception as e:
-            print(f"❌ [PYTHON] Erro crítico no treinamento: {e}", file=sys.stderr)
-            # Se o ML falha completamente, retorna acurácia 0 e deixa o fallback lidar
+            print(f"❌ [PYTHON] Erro critico no treinamento: {e}", file=sys.stderr)
+            # Se o ML falha completamente, retorna acuracia 0 e deixa o fallback lidar
             return 0.0
 
     def par_viavel(self, row):
-        """Verifica se um par turma-sala é viável"""
+        """Verifica se um par turma-sala e viavel"""
         if row["esp_deficit"] > 0:
             return False
-        # Não permitir ocupação > 100% (mesmo com móveis)
+        # Nao permitir ocupacao > 100% (mesmo com moveis)
         if row["ocupacao"] > 1.0:
             return False
         return (row["deficit"] == 0) or (row["sala_movel"] == 1 and row["deficit"] <= 3)
@@ -303,7 +308,7 @@ class AlocacaoInteligenteMLA:
                 
                 # Explicar como foi calculado o score
                 score_base = max(0, 1 - abs(ocupacao - 0.85))
-                obs_detalhes = f"Ocupação: {ocupacao:.1%} (score base: {score_base:.2f})"
+                obs_detalhes = f"Ocupacao: {ocupacao:.1%} (score base: {score_base:.2f})"
                 
                 if melhor_sala["cadeiras_especiais"] == turma["esp_necessarias"]:
                     obs_detalhes += f", Match exato especiais (+10%)"
@@ -328,7 +333,7 @@ class AlocacaoInteligenteMLA:
                     "esp_necessarias": turma["esp_necessarias"],
                     "motivo": motivo
                 })
-                print(f"❌ [PYTHON] Turma '{turma['nome']}' não pôde ser alocada: {motivo}", file=sys.stderr)
+                print(f"❌ [PYTHON] Turma '{turma['nome']}' nao pode ser alocada: {motivo}", file=sys.stderr)
         
         # Calcular score com denominador correto (máximo de matches possíveis)
         salas_ativas = [s for s in self.salas if s["status"].upper() == "ATIVA"]
@@ -376,7 +381,7 @@ class AlocacaoInteligenteMLA:
                     best_score = score
                     best_assign = salas_perm
         except Exception as e:
-            print(f"⚠️ [PYTHON] Erro na otimização ML: {e}. Usando algoritmo simples.", file=sys.stderr)
+            print(f"⚠️ [PYTHON] Erro na otimizacao ML: {e}. Usando algoritmo simples.", file=sys.stderr)
             return self._algoritmo_simples_fallback()
         
         alocacoes_otimas = []
@@ -401,7 +406,7 @@ class AlocacaoInteligenteMLA:
                 score_final = float(linha['proba_bom'])  # combinado
                 
                 obs_detalhes = (
-                    f"Ocupação: {ocupacao:.1%} (score ocupação: {score_base:.2f}), "
+                    f"Ocupacao: {ocupacao:.1%} (score ocupacao: {score_base:.2f}), "
                     f"Score ML: {score_ml:.2f}, "
                     f"Score combinado: {score_final:.2f}, "
                     f"Especiais: {linha['esp_necessarias']}/{linha['esp_disponiveis']} (ML)"
@@ -409,7 +414,7 @@ class AlocacaoInteligenteMLA:
                 
                 # Indicar se foi match perfeito
                 if bool(linha.get("match_perfeito", False)):
-                    obs_detalhes += ", Match perfeito (forçado a 100%)"
+                    obs_detalhes += ", Match perfeito (forcado a 100%)"
                 
                 alocacoes_otimas.append({
                     "sala_id": sala_real["id"],
@@ -429,23 +434,23 @@ class AlocacaoInteligenteMLA:
                         "motivo": self._analisar_motivo_nao_alocacao(turma)
                     })
             
-            print(f"✅ [PYTHON] ML encontrou {len(alocacoes_otimas)} alocações com score {best_score:.2f}", file=sys.stderr)
+            print(f"✅ [PYTHON] ML encontrou {len(alocacoes_otimas)} alocacoes com score {best_score:.2f}", file=sys.stderr)
             return alocacoes_otimas, best_score, turmas_nao_alocadas
         else:
             # ML não conseguiu encontrar solução, usar algoritmo simples
-            print("⚠️ [PYTHON] ML não encontrou soluções viáveis. Usando algoritmo simples.", file=sys.stderr)
+            print("⚠️ [PYTHON] ML nao encontrou solucoes viaveis. Usando algoritmo simples.", file=sys.stderr)
             return self._algoritmo_simples_fallback()
 
     def _analisar_motivo_nao_alocacao(self, turma):
-        """Analisa por que uma turma não foi alocada"""
+        """Analisa por que uma turma nao foi alocada"""
         motivos = []
         
-        # Verificar se há salas disponíveis
+        # Verificar se ha salas disponiveis
         salas_ativas = [s for s in self.salas if s["status"].upper() == "ATIVA"]
         if len(salas_ativas) == 0:
-            return "Nenhuma sala ativa disponível"
+            return "Nenhuma sala ativa disponivel"
         
-        # Verificar se há mais turmas que salas
+        # Verificar se ha mais turmas que salas
         if len(self.turmas) > len(salas_ativas):
             motivos.append(f"Mais turmas ({len(self.turmas)}) que salas ({len(salas_ativas)})")
         
@@ -461,11 +466,11 @@ class AlocacaoInteligenteMLA:
             salas_compativeis += 1
         
         if salas_compativeis == 0:
-            motivos.append("Nenhuma sala compatível (capacidade ou cadeiras especiais)")
+            motivos.append("Nenhuma sala compativel (capacidade ou cadeiras especiais)")
         elif salas_compativeis < len(self.turmas):
-            motivos.append("Poucas salas compatíveis para todas as turmas")
+            motivos.append("Poucas salas compativeis para todas as turmas")
         
-        return "; ".join(motivos) if motivos else "Salas insuficientes para otimização"
+        return "; ".join(motivos) if motivos else "Salas insuficientes para otimizacao"
 
     def _analisar_problemas(self):
         """Analisa problemas detalhados da alocação"""
@@ -496,25 +501,25 @@ class AlocacaoInteligenteMLA:
                     turma_opcoes += 1
                     
                     if ocupacao > 1.0:
-                        avisos.append(f"Turma '{t['nome']}' em '{s['nome']}': ocupação de {ocupacao:.1%} (acima de 100%)")
+                        avisos.append(f"Turma '{t['nome']}' em '{s['nome']}': ocupacao de {ocupacao:.1%} (acima de 100%)")
                     elif ocupacao < 0.5:
-                        avisos.append(f"Turma '{t['nome']}' em '{s['nome']}': baixa ocupação de {ocupacao:.1%} (desperdício de espaço)")
+                        avisos.append(f"Turma '{t['nome']}' em '{s['nome']}': baixa ocupacao de {ocupacao:.1%} (desperdicio de espaco)")
             
             if turma_opcoes == 0:
                 problemas.append({
                     "turma": t["nome"],
                     "tipo": "sem_opcoes",
                     "detalhes": turma_problemas,
-                    "resumo": f"Turma '{t['nome']}' ({t['alunos']} alunos, {t['esp_necessarias']} especiais) não tem nenhuma sala compatível"
+                    "resumo": f"Turma '{t['nome']}' ({t['alunos']} alunos, {t['esp_necessarias']} especiais) nao tem nenhuma sala compativel"
                 })
             elif turma_opcoes == 1:
-                avisos.append(f"Turma '{t['nome']}' tem apenas 1 opção de sala - flexibilidade limitada")
+                avisos.append(f"Turma '{t['nome']}' tem apenas 1 opcao de sala - flexibilidade limitada")
         
         # Verificar conflitos de salas
         if len(self.salas) < len(self.turmas):
             problemas.append({
                 "tipo": "salas_insuficientes", 
-                "resumo": f"Há {len(self.turmas)} turmas para apenas {len(self.salas)} salas - conflitos inevitáveis"
+                "resumo": f"Ha {len(self.turmas)} turmas para apenas {len(self.salas)} salas - conflitos inevitaveis"
             })
         
         return {
@@ -633,17 +638,17 @@ def main():
         parametros = json.loads(args.parametros)
         
         print(f"📊 [PYTHON] Dados parseados: {len(dados.get('salas', []))} salas, {len(dados.get('turmas', []))} turmas", file=sys.stderr)
-        print(f"⚙️ [PYTHON] Parâmetros: {parametros}", file=sys.stderr)
+        print(f"⚙️ [PYTHON] Parametros: {parametros}", file=sys.stderr)
         
         # Executar algoritmo
-        print("🤖 [PYTHON] Criando instância do algoritmo...", file=sys.stderr)
+        print("🤖 [PYTHON] Criando instancia do algoritmo...", file=sys.stderr)
         algoritmo = AlocacaoInteligenteMLA(dados['salas'], dados['turmas'], parametros)
         
         print("⚡ [PYTHON] Executando algoritmo...", file=sys.stderr)
         resultado = algoritmo.executar()
         
         print(f"✅ [PYTHON] Algoritmo executado! Success: {resultado.get('success')}", file=sys.stderr)
-        print(f"📈 [PYTHON] Resultado: {len(resultado.get('alocacoes', []))} alocações, score: {resultado.get('score_otimizacao')}", file=sys.stderr)
+        print(f"📈 [PYTHON] Resultado: {len(resultado.get('alocacoes', []))} alocacoes, score: {resultado.get('score_otimizacao')}", file=sys.stderr)
         
         print(json.dumps(resultado, ensure_ascii=False))
         
@@ -652,7 +657,7 @@ def main():
             sys.exit(1)
             
     except Exception as e:
-        print(f"💥 [PYTHON] Exceção capturada: {str(e)}", file=sys.stderr)
+        print(f"💥 [PYTHON] Excecao capturada: {str(e)}", file=sys.stderr)
         import traceback
         print(f"🔍 [PYTHON] Traceback: {traceback.format_exc()}", file=sys.stderr)
         

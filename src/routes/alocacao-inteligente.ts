@@ -128,11 +128,15 @@ router.post('/:alocacao_id', async (req, res) => {
             horario_id: horario.id,
             score_otimizacao: resultadoPython.score_otimizacao,
             acuracia_modelo: resultadoPython.acuracia_modelo,
+            total_turmas: resultadoPython.total_turmas || 0,
+            turmas_alocadas: resultadoPython.total_alocacoes || 0,
+            turmas_sobrando: resultadoPython.turmas_sobrando || 0,
             priorizar_capacidade: parametros.priorizar_capacidade,
             priorizar_especiais: parametros.priorizar_especiais,
             priorizar_proximidade: parametros.priorizar_proximidade,
             analise_detalhada: JSON.stringify(resultadoPython.analise_detalhada),
             debug_info: JSON.stringify(resultadoPython.debug_info || {}),
+            turmas_nao_alocadas: JSON.stringify(resultadoPython.turmas_nao_alocadas || []),
             alocacoes: {
               create: resultadoPython.alocacoes.map((alocacao: any) => ({
                 sala_id: alocacao.sala_id,
@@ -166,14 +170,62 @@ router.post('/:alocacao_id', async (req, res) => {
         console.log(`✅ Horário ${horario.dia_semana} ${horario.periodo} processado com sucesso`);
       } else {
         console.log(`❌ Erro no horário ${horario.dia_semana} ${horario.periodo}: ${resultadoPython.error}`);
-        resultadosHorarios.push({
-          horario: {
-            id: horario.id,
-            dia_semana: horario.dia_semana,
-            periodo: horario.periodo
-          },
-          erro: resultadoPython.error
-        });
+        
+        // Salvar erro no banco para histórico
+        try {
+          const resultadoErro = await prisma.resultadoAlocacaoHorario.create({
+            data: {
+              alocacao_id: alocacao_id,
+              horario_id: horario.id,
+              score_otimizacao: 0,
+              acuracia_modelo: 0,
+              total_turmas: turmasData.length,
+              turmas_alocadas: 0,
+              turmas_sobrando: turmasData.length,
+              priorizar_capacidade: parametros.priorizar_capacidade,
+              priorizar_especiais: parametros.priorizar_especiais,
+              priorizar_proximidade: parametros.priorizar_proximidade,
+              analise_detalhada: JSON.stringify({ erro: true, detalhes: resultadoPython.error }),
+              debug_info: JSON.stringify(resultadoPython.diagnostico || {}),
+              turmas_nao_alocadas: JSON.stringify(turmasData.map(t => ({
+                id: t.id,
+                nome: t.nome,
+                alunos: t.alunos,
+                esp_necessarias: t.esp_necessarias,
+                motivo: "Erro no processamento da alocação"
+              }))),
+              alocacoes: { create: [] }
+            }
+          });
+          
+          resultadosHorarios.push({
+            horario: {
+              id: horario.id,
+              dia_semana: horario.dia_semana,
+              periodo: horario.periodo
+            },
+            resultado: resultadoErro,
+            erro: resultadoPython.error,
+            python_result: {
+              success: false,
+              error: resultadoPython.error,
+              total_turmas: turmasData.length,
+              turmas_alocadas: 0,
+              turmas_sobrando: turmasData.length,
+              score_otimizacao: 0
+            }
+          });
+        } catch (dbError) {
+          console.error(`Erro ao salvar resultado de erro no banco:`, dbError);
+          resultadosHorarios.push({
+            horario: {
+              id: horario.id,
+              dia_semana: horario.dia_semana,
+              periodo: horario.periodo
+            },
+            erro: resultadoPython.error
+          });
+        }
       }
     }
 

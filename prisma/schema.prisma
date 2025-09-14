@@ -200,12 +200,16 @@ model ResultadoAlocacaoHorario {
   horario_id            String
   score_otimizacao      Float
   acuracia_modelo       Float @default(0)
+  total_turmas          Int?
+  turmas_alocadas       Int?
+  turmas_sobrando       Int?
   data_geracao          DateTime @default(now())
   priorizar_capacidade  Boolean @default(true)
   priorizar_especiais   Boolean @default(true)
   priorizar_proximidade Boolean @default(true)
   analise_detalhada     String // JSON
   debug_info            String // JSON
+  turmas_nao_alocadas   String? // JSON - lista de turmas que não foram alocadas
   created_at            DateTime @default(now())
 
   // Relacionamentos

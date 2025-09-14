@@ -128,6 +128,34 @@ router.put('/:id', async (req, res) => {
       });
     }
 
+    // Se o nome está sendo alterado, verificar se não conflita nos horários onde a turma está
+    if (updateData.nome !== undefined && updateData.nome !== existingTurma.nome) {
+      // Buscar todos os horários onde esta turma está
+      const horariosComTurma = await req.prisma.horarioTurma.findMany({
+        where: { turma_id: id },
+        include: { horario: true }
+      });
+
+      // Para cada horário, verificar se já existe outra turma com o mesmo nome
+      for (const horarioTurma of horariosComTurma) {
+        const turmasNoHorario = await req.prisma.horarioTurma.findMany({
+          where: { horario_id: horarioTurma.horario_id },
+          include: { turma: true }
+        });
+
+        const conflito = turmasNoHorario.find(ht => 
+          ht.turma.nome === updateData.nome && ht.turma_id !== id
+        );
+
+        if (conflito) {
+          return res.status(400).json({
+            success: false,
+            error: `Já existe uma turma com o nome "${updateData.nome}" no horário ${horarioTurma.horario.dia_semana} ${horarioTurma.horario.periodo}`
+          });
+        }
+      }
+    }
+
     // Validar apenas os campos que foram enviados
     const fieldsToUpdate: any = {};
     

@@ -140,6 +140,23 @@ router.put('/:id', async (req, res) => {
       });
     }
 
+    // Se o nome está sendo alterado, verificar unicidade
+    if (updateData.nome !== undefined && updateData.nome !== existingSala.nome) {
+      const salaComMesmoNome = await req.prisma.sala.findFirst({
+        where: { 
+          nome: updateData.nome,
+          id: { not: id } // Excluir a sala atual da verificação
+        }
+      });
+
+      if (salaComMesmoNome) {
+        return res.status(400).json({
+          success: false,
+          error: 'Já existe uma sala com este nome'
+        });
+      }
+    }
+
     // Validar apenas os campos que foram enviados
     const fieldsToUpdate: any = {};
     

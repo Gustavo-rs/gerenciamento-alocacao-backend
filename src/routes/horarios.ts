@@ -291,4 +291,60 @@ router.post('/:id/clone', async (req, res) => {
   }
 });
 
+// Deletar horário
+router.delete('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Verificar se o horário existe
+    const horarioExistente = await req.prisma.horario.findUnique({
+      where: { id },
+      include: {
+        turmas: {
+          include: {
+            turma: true
+          }
+        }
+      }
+    });
+
+    if (!horarioExistente) {
+      return res.status(404).json({
+        success: false,
+        error: 'Horário não encontrado'
+      });
+    }
+
+    const turmasCount = horarioExistente.turmas.length;
+
+    // Deletar todas as associações turma-horário
+    await req.prisma.horarioTurma.deleteMany({
+      where: { horario_id: id }
+    });
+
+    // Deletar todas as turmas associadas
+    for (const horarioTurma of horarioExistente.turmas) {
+      await req.prisma.turma.delete({
+        where: { id: horarioTurma.turma.id }
+      });
+    }
+
+    // Deletar o horário
+    await req.prisma.horario.delete({
+      where: { id }
+    });
+
+    res.json({
+      success: true,
+      message: `Horário deletado com sucesso${turmasCount > 0 ? ` (${turmasCount} turma${turmasCount > 1 ? 's' : ''} removida${turmasCount > 1 ? 's' : ''})` : ''}`
+    });
+  } catch (error) {
+    console.error('Erro ao deletar horário:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Erro interno do servidor'
+    });
+  }
+});
+
 export default router;

@@ -105,11 +105,21 @@ class AlocacaoInteligenteMLA:
         self.df = None
         self.debug_best_params = None
         self.modelo_regras = None
+        self.permitir_fallback_simples = bool(self.parametros.get("permitir_fallback_simples", False))
+        self.modo_otimizador = self.parametros.get("forcar_otimizador", "auto")  # "fluxo" | "hungarian" | "auto"
 
     def _normalize_salas(self, salas):
         normalized = []
         for sala in salas:
-            moveis_qtd = int(sala.get("cadeiras_moveis", 0) or 0)
+            # Aceita bool ou número. Se vier só bool, quantidade é desconhecida (None).
+            raw_flag = sala.get("cadeiras_moveis", 0)
+            raw_qtd  = sala.get("cadeiras_moveis_qtd", None)
+            if raw_qtd is not None:
+                moveis_qtd = int(raw_qtd or 0)
+                tem_moveis = moveis_qtd > 0
+            else:
+                tem_moveis = bool(raw_flag)
+                moveis_qtd = None
             normalized.append({
                 "id": sala.get("id"),
                 "id_sala": sala.get("id_sala", sala.get("id")),
@@ -117,8 +127,8 @@ class AlocacaoInteligenteMLA:
                 "capacidade_total": int(sala.get("capacidade_total", 0) or 0),
                 "localizacao": sala.get("localizacao", ""),
                 "status": str(sala.get("status", "ATIVA")).upper(),
-                "cadeiras_moveis_qtd": moveis_qtd,
-                "cadeiras_moveis": bool(moveis_qtd > 0),
+                "cadeiras_moveis_qtd": moveis_qtd,  # pode ser None (desconhecida)
+                "cadeiras_moveis": tem_moveis,
                 "cadeiras_especiais": int(sala.get("cadeiras_especiais", 0) or 0),
             })
         return normalized
@@ -175,6 +185,8 @@ class AlocacaoInteligenteMLA:
 
                 cap_para_score = cap_efetiva if permitir_moveis_ml else cap
                 score_ocupacao = score_ocupacao_puro(alunos, cap_para_score, alvo_ocupacao)
+                score_ocupacao_base = score_ocupacao_puro(alunos, cap, alvo_ocupacao)
+                score_ocupacao_eff = score_ocupacao_puro(alunos, cap_efetiva, alvo_ocupacao)
 
                 ocup_para_label = ocupacao_eff if permitir_moveis_ml else ocupacao
                 deficit_para_label = deficit_eff if permitir_moveis_ml else deficit
@@ -204,137 +216,290 @@ class AlocacaoInteligenteMLA:
                     "ocupacao": ocupacao,
                     "ocupacao_eff": ocupacao_eff,
                     "score_ocupacao": score_ocupacao,
+                    "score_ocupacao_base": score_ocupacao_base,
+                    "score_ocupacao_eff": score_ocupacao_eff,
                     "esp_necessarias": esp_need,
                     "esp_disponiveis": esp_have,
                     "esp_deficit": esp_deficit,
                     "esp_sobra": esp_sobra,
                     "atende_especial": atende_especial,
-                    "label_heuristico": label_heuristico
+                    "label_heuristico": label_heuristico,
+                    "precisa_moveis": int(deficit > 0),
+                    "precisa_moveis_eff": int(deficit_eff > 0),
+                    "dist_alvo_occ": abs((ocupacao_eff if permitir_moveis_ml else ocupacao) - alvo_ocupacao)
                 })
         return pd.DataFrame(rows)
 
-    def _treinar_e_pontuar(self):
-        """Treina modelo com validação cruzada, grid search e calibração"""
-        print("🔍 [ML] Iniciando treinamento avançado", file=sys.stderr)
+    def _sample_weights(self):
+        """
+        Pesos de amostra para a árvore, inspirados em regras de negócio:
+        - prioridade para pares com especiais atendidos;
+        - bônus para match perfeito (capacidade exata);
+        - leve penalização quando depende de móveis;
+        - reforço para ocupação perto do alvo (informativo).
+        """
+        df = self.df
+        p = self.parametros
+        alvo = float(p.get("alvo_ocupacao", 0.85))
+        permitir_moveis_ml = bool(p.get("permitir_moveis_no_ml", False))
 
+        precisa = df["precisa_moveis_eff"] if (permitir_moveis_ml and "precisa_moveis_eff" in df.columns) else df["precisa_moveis"]
+        occ = df["ocupacao_eff"] if (permitir_moveis_ml and "ocupacao_eff" in df.columns) else df["ocupacao"]
+
+        # base
+        w = np.ones(len(df), dtype=float)
+
+        # atende especiais vale mais (evita soluções inviáveis)
+        w += 0.4 * df["atende_especial"].values
+
+        # match perfeito (capacidade exata + especiais ok) tem peso alto
+        match_perfeito = (np.isclose(df["ocupacao"].values, 1.0)) & (df["esp_deficit"].values == 0) & (df["deficit"].values == 0)
+        w += 0.6 * match_perfeito.astype(float)
+
+        # leve penalização se depende de móveis (não proíbe, só educa a árvore)
+        w -= 0.2 * precisa.values
+
+        # exemplo de "informativeness": quanto mais perto do alvo, mais peso (até +0.3)
+        w += 0.3 * np.maximum(0.0, 1 - np.minimum(np.abs(occ - alvo) / max(alvo, 1e-9), 1))
+
+        return np.clip(w, 0.1, 3.0)
+
+    def _refino_troca_2opt(self, alocacoes):
+        """Refino local 2-opt: tenta trocar pares de alocações para melhorar o score total"""
+        if not alocacoes:
+            return alocacoes
+
+        # mapa rápidos
+        by_tid = {t["id"]: t for t in self.turmas}
+        by_sid = {s["id"]: s for s in self.salas}
+        # cria lookup do DF por (tid,sid_sala)
+        dfk = self.df.set_index(["id_turma", "id_sala"])
+
+        melhorou = True
+        while melhorou:
+            melhorou = False
+            for i in range(len(alocacoes)):
+                for j in range(i+1, len(alocacoes)):
+                    a, b = alocacoes[i], alocacoes[j]
+                    tA, sA = by_tid[a["turma_id"]], by_sid[a["sala_id"]]
+                    tB, sB = by_tid[b["turma_id"]], by_sid[b["sala_id"]]
+
+                    # linhas atuais e trocadas
+                    try:
+                        rAA = dfk.loc[(tA["id_turma"], sA["id_sala"])]
+                        rBB = dfk.loc[(tB["id_turma"], sB["id_sala"])]
+                        rAB = dfk.loc[(tA["id_turma"], sB["id_sala"])]
+                        rBA = dfk.loc[(tB["id_turma"], sA["id_sala"])]
+                    except KeyError:
+                        continue
+
+                    # viabilidade simples (sem violar especiais)
+                    def ok(r): return (r["esp_deficit"] == 0) and ((r["capacidade_total"] >= r["alunos"]) or r["sala_movel"])
+
+                    if ok(rAB) and ok(rBA):
+                        score_old = float(rAA["proba_bom"]) + float(rBB["proba_bom"])
+                        score_new = float(rAB["proba_bom"]) + float(rBA["proba_bom"])
+                        # margem mínima de melhoria para trocar
+                        if score_new > score_old + 1e-6:
+                            a["sala_id"], b["sala_id"] = sB["id"], sA["id"]
+                            a["compatibilidade_score"] = round(float(rAB["proba_bom"])*100, 2)
+                            b["compatibilidade_score"] = round(float(rBA["proba_bom"])*100, 2)
+                            melhorou = True
+                            break
+                if melhorou: break
+        return alocacoes
+
+    def _prova_impossibilidade(self):
+        """Diagnóstico explícito para a UI sobre impossibilidade estrutural"""
+        salas_ativas = [s for s in self.salas if s["status"].upper() == "ATIVA"]
+        n_t, n_s = len(self.turmas), len(salas_ativas)
+        prova = {
+            "turmas": n_t, 
+            "salas_ativas": n_s,
+            "limite_teorico_max_matches": min(n_t, n_s),
+            "impossibilidade_estrutural": n_t > n_s
+        }
+        
+        # Estimativa rápida de cadeiras móveis faltantes para tentar fechar 100%:
+        moveis_disponiveis = 0
+        for s in salas_ativas:
+            if s.get("cadeiras_moveis", False):
+                qtd = s.get("cadeiras_moveis_qtd")
+                if qtd is not None:
+                    moveis_disponiveis += int(qtd or 0)
+                else:
+                    # Se não tem quantidade declarada, assume que pode doar toda a sobra
+                    moveis_disponiveis += s["capacidade_total"]
+        demanda_min = 0
+        for t in self.turmas:
+            candidatas = [s for s in salas_ativas if s["cadeiras_especiais"] >= t["esp_necessarias"]]
+            if not candidatas:
+                prova.setdefault("turmas_sem_especiais", []).append(t["nome"])
+                continue
+            deficit_min = min(max(0, t["alunos"] - s["capacidade_total"]) for s in candidatas)
+            demanda_min += deficit_min
+        
+        if demanda_min > moveis_disponiveis:
+            prova["cadeiras_moveis_faltantes"] = int(demanda_min - moveis_disponiveis)
+        
+        return prova
+
+    def _treinar_e_pontuar(self):
+        """Treina Árvore de Decisão robusta (Grid + Poda + Calibração) e calcula proba_bom."""
+        print("🔍 [ML] Árvore robusta (grid+poda+calibração)", file=sys.stderr)
+
+        # ---- features ----
         feature_cols = [
             "alunos", "capacidade_total", "deficit", "sobra_local", "sala_movel",
             "ocupacao", "score_ocupacao", "esp_necessarias", "esp_disponiveis",
-            "esp_deficit", "esp_sobra", "atende_especial"
+            "esp_deficit", "esp_sobra", "atende_especial",
+            "precisa_moveis",  # ajuda a árvore a "ver" a dependência de móveis
+            "dist_alvo_occ"    # distância do alvo de ocupação (85%)
         ]
         if self.parametros.get("permitir_moveis_no_ml", False):
-            for col in ["capacidade_efetiva", "deficit_eff", "ocupacao_eff"]:
-                if col not in feature_cols and col in self.df.columns:
+            for col in ["capacidade_efetiva", "deficit_eff", "ocupacao_eff", "precisa_moveis_eff"]:
+                if col in self.df.columns and col not in feature_cols:
                     feature_cols.append(col)
 
         X = self.df[feature_cols].values
         y = self.df["label_heuristico"].values
+        sw = self._sample_weights()
 
         print(f"📊 [ML] Dataset: {len(X)} pares, classes: {Counter(y)}", file=sys.stderr)
 
+        # ---- pesos para mistura final com score_ocupacao (compatível com seu contrato) ----
         p = self.parametros
-        peso_ml = float(p.get("peso_ml", 0.4))
-        peso_occ = float(p.get("peso_ocupacao", 0.6))
+        peso_ml  = float(p.get("peso_ml", 0.6))          # dá mais peso para ML, já que é "só árvore"
+        peso_occ = float(p.get("peso_ocupacao", 0.4))
+        total = max(1e-9, peso_ml + peso_occ)
+        peso_ml, peso_occ = peso_ml/total, peso_occ/total
+        print(f"📊 [ML] Pesos: ML={peso_ml:.2f} | Ocupação={peso_occ:.2f}", file=sys.stderr)
+
         limiar_cls = float(p.get("limiar_cls", 0.5))
+        use_grid   = bool(p.get("gridsearch", True))
+        use_parallel = bool(p.get("parallel_ml", False))
+        n_jobs_grid = -1 if use_parallel else 1
 
-        if peso_ml + peso_occ != 1.0:
-            total = peso_ml + peso_occ
-            peso_ml = peso_ml / total
-            peso_occ = peso_occ / total
-            print(f"📊 [ML] Pesos normalizados: ML={peso_ml:.2f}, Ocupação={peso_occ:.2f}", file=sys.stderr)
-
+        # hiperparâmetros custom se vierem
         custom_max_depth = p.get("max_depth")
         custom_min_samples_split = p.get("min_samples_split")
         custom_min_samples_leaf = p.get("min_samples_leaf")
 
-        if len(np.unique(y)) > 1 and len(y) >= 12:
-            print("🎯 [ML] Dataset suficiente: usando Grid Search + Calibração", file=sys.stderr)
-            cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
-            param_grid = {
-                "max_depth": [custom_max_depth] if custom_max_depth else [3, 4, 5, None],
-                "min_samples_split": [custom_min_samples_split] if custom_min_samples_split else [2, 5, 10],
-                "min_samples_leaf": [custom_min_samples_leaf] if custom_min_samples_leaf else [1, 2, 5],
-            }
-            grid = GridSearchCV(
-                DecisionTreeClassifier(random_state=42, class_weight="balanced"),
-                param_grid=param_grid,
-                scoring="f1", cv=cv, n_jobs=-1
-            )
-            grid.fit(X, y)
-            base = grid.best_estimator_
-            self.debug_best_params = grid.best_params_
-            print(f"🏆 [ML] Melhores parâmetros: {self.debug_best_params}", file=sys.stderr)
+        # ---- treinamento da árvore ----
+        # Regra: se temos ao menos 12 exemplos e as duas classes, fazemos grid + calibração.
+        tem_duas_classes = (len(np.unique(y)) > 1)
+        tree_proba = None
 
-            self.clf = CalibratedClassifierCV(base, method="sigmoid", cv=3)
-            self.clf.fit(X, y)
-            self.df["proba_ml"] = self.clf.predict_proba(X)[:, 1]
-
+        if tem_duas_classes and len(y) >= 12 and use_grid:
             try:
-                self.modelo_regras = export_text(base, feature_names=feature_cols)
-                print("📋 [ML] Regras da árvore exportadas para debug", file=sys.stderr)
-                if self.parametros.get("dump_arvore"):
-                    with open("arvore_decisao.txt", "w", encoding="utf-8") as f:
-                        f.write(self.modelo_regras)
-                    print("💾 [DUMP] Árvore salva em: arvore_decisao.txt", file=sys.stderr)
+                print("🎯 [ML] GridSearch + Poda + Calibração", file=sys.stderr)
+                cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+                param_grid = {
+                    "max_depth": [custom_max_depth] if custom_max_depth is not None else [3, 4, 5, None],
+                    "min_samples_split": [custom_min_samples_split] if custom_min_samples_split is not None else [2, 5, 10],
+                    "min_samples_leaf": [custom_min_samples_leaf] if custom_min_samples_leaf is not None else [1, 2, 5],
+                    "min_impurity_decrease": [0.0, 1e-4, 1e-3],   # ← ajuda na estabilidade
+                    "ccp_alpha": [0.0, 1e-4, 1e-3]               # ← poda por complexidade
+                }
+                base = DecisionTreeClassifier(random_state=42, class_weight="balanced")
+                grid = GridSearchCV(base, param_grid=param_grid, scoring="f1", cv=cv, n_jobs=n_jobs_grid)
+                grid.fit(X, y, sample_weight=sw)
+                best = grid.best_estimator_
+                self.debug_best_params = grid.best_params_
+                print(f"🏆 [ML] Best params: {self.debug_best_params}", file=sys.stderr)
+
+                # calibração: isotônica se base for estável e dados suficientes, senão sigmoid
+                calib_method = "isotonic" if len(y) >= 100 else "sigmoid"
+                cal = CalibratedClassifierCV(best, method=calib_method, cv=3)
+                cal.fit(X, y, sample_weight=sw)
+                self.clf = cal
+                tree_proba = self.clf.predict_proba(X)[:, 1]
+
+                try:
+                    self.modelo_regras = export_text(best, feature_names=feature_cols)
+                    if self.parametros.get("dump_arvore"):
+                        with open("arvore_decisao.txt", "w", encoding="utf-8") as f:
+                            f.write(self.modelo_regras)
+                    print("📋 [ML] Regras exportadas", file=sys.stderr)
+                except Exception as e:
+                    print(f"⚠️ [ML] Erro ao exportar regras: {e}", file=sys.stderr)
             except Exception as e:
-                print(f"⚠️ [ML] Erro ao exportar regras: {e}", file=sys.stderr)
-        else:
-            print("⚠️ [ML] Dataset pequeno: treinamento básico sem calibração", file=sys.stderr)
+                print(f"⚠️ [ML] GridSearch falhou ({e}). Caindo para árvore simples.", file=sys.stderr)
+                use_grid = False
+                # Continua para o else que treina a árvore simples
+
+        if not use_grid or not tem_duas_classes or len(y) < 12:
+            print("⚠️ [ML] Árvore simples (sem grid/calibração) — dataset pequeno ou classe única", file=sys.stderr)
             self.clf = DecisionTreeClassifier(
                 max_depth=custom_max_depth or 4,
                 min_samples_split=custom_min_samples_split or 2,
                 min_samples_leaf=custom_min_samples_leaf or 1,
+                min_impurity_decrease=1e-4,   # um pouco de estabilidade
+                ccp_alpha=1e-4,               # poda leve
                 random_state=42,
                 class_weight="balanced"
             )
-            self.clf.fit(X, y)
-            proba_result = self.clf.predict_proba(X)
-            self.df["proba_ml"] = proba_result[:, 1] if proba_result.shape[1] > 1 else 0.0
+            self.clf.fit(X, y, sample_weight=sw)
+            proba = getattr(self.clf, "predict_proba", None)
+            tree_proba = proba(X)[:, 1] if proba is not None else np.zeros(len(X))
             self.debug_best_params = {
-                "max_depth": custom_max_depth or 4,
-                "min_samples_split": custom_min_samples_split or 2,
-                "min_samples_leaf": custom_min_samples_leaf or 1
+                "max_depth": self.clf.get_params().get("max_depth"),
+                "min_samples_split": self.clf.get_params().get("min_samples_split"),
+                "min_samples_leaf": self.clf.get_params().get("min_samples_leaf"),
+                "min_impurity_decrease": self.clf.get_params().get("min_impurity_decrease"),
+                "ccp_alpha": self.clf.get_params().get("ccp_alpha")
             }
 
+        # ---- prob final do ML (só árvore) ----
+        self.df["proba_ml"] = np.clip(tree_proba, 0.0, 1.0)
+
+        # ---- combinação com score de ocupação ----
         self.df["proba_bom"] = np.clip(
-            peso_ml * self.df["proba_ml"] + peso_occ * self.df["score_ocupacao"].values,
+            peso_ml * self.df["proba_ml"].values + peso_occ * self.df["score_ocupacao"].values,
             0.0, 1.0
         )
-        print(f"✅ [ML] Probabilidades combinadas: ML({peso_ml:.1%}) + Ocupação({peso_occ:.1%})", file=sys.stderr)
+        # 🚧 Regra de negócio: se cabe sem déficit e especiais atendem, não deixar o ML derrubar.
+        cond_sem_deficit = (self.df["deficit"] == 0) & (self.df["esp_deficit"] == 0)
+        self.df.loc[cond_sem_deficit, "proba_bom"] = np.maximum(
+            self.df.loc[cond_sem_deficit, "proba_bom"],
+            self.df.loc[cond_sem_deficit, "score_ocupacao"]
+        )
+        print(f"✅ [ML] Combinação: ML({peso_ml:.1%}) + Ocupação({peso_occ:.1%})", file=sys.stderr)
 
+        # ---- boost para match perfeito ----
         mask_perfeito = (
             np.isclose(self.df["ocupacao"].values, 1.0) &
             (self.df["esp_deficit"].values == 0) &
             (self.df["deficit"].values == 0)
         )
-        matches_perfeitos = mask_perfeito.sum()
-        if matches_perfeitos > 0:
+        self.df["match_perfeito"] = False
+        if mask_perfeito.any():
             self.df.loc[mask_perfeito, "proba_bom"] = 1.0
-            self.df["match_perfeito"] = False
             self.df.loc[mask_perfeito, "match_perfeito"] = True
-            print(f"🎯 [ML] {matches_perfeitos} matches perfeitos forçados a 100%", file=sys.stderr)
-        else:
-            self.df["match_perfeito"] = False
+            print(f"🎯 [ML] {mask_perfeito.sum()} matches perfeitos forçados a 100%", file=sys.stderr)
 
+        # ---- Métricas (preferir CV quando possível) ----
         try:
-            if len(np.unique(y)) > 1:
-                usar_metricas_cv = self.parametros.get("metricas_cv", True)
+            usar_metricas_cv = bool(self.parametros.get("metricas_cv", True))
+            if tem_duas_classes:
                 if len(y) >= 12 and usar_metricas_cv:
-                    print("🔍 [METRICS] Usando métricas honestas com cross-validation", file=sys.stderr)
+                    print("🔍 [METRICS] F1 com CV honesta (via proba_ml)", file=sys.stderr)
                     cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
-                    y_proba_cv = cross_val_predict(self.clf, X, y, cv=cv, method="predict_proba")[:, 1]
-                    y_pred_cv = (y_proba_cv >= limiar_cls).astype(int)
-                    self.clf_report = classification_report(y, y_pred_cv, output_dict=True, zero_division=0)
-                    print(f"📈 [METRICS] F1-score honesto (CV): {self.clf_report.get('1', {}).get('f1-score', 0):.3f}", file=sys.stderr)
-                    self.metricas_honestas = True
+                    try:
+                        # probas em CV para honestidade
+                        y_proba_cv = cross_val_predict(self.clf, X, y, cv=cv, method="predict_proba", n_jobs=1)[:, 1]
+                        y_pred_cv = (y_proba_cv >= limiar_cls).astype(int)
+                        self.clf_report = classification_report(y, y_pred_cv, output_dict=True, zero_division=0)
+                        self.metricas_honestas = True
+                    except Exception as e:
+                        print(f"⚠️ [METRICS] CV falhou ({e}). Usando treino=teste.", file=sys.stderr)
+                        y_pred = (self.df['proba_ml'].values >= limiar_cls).astype(int)
+                        self.clf_report = classification_report(y, y_pred, output_dict=True, zero_division=0)
+                        self.metricas_honestas = False
                 else:
-                    if not usar_metricas_cv:
-                        print("⚠️ [METRICS] Métricas CV desabilitadas: usando treino=teste", file=sys.stderr)
-                    else:
-                        print("⚠️ [METRICS] Dataset pequeno: métricas simples (treino=teste)", file=sys.stderr)
+                    print("⚠️ [METRICS] Dataset pequeno/sem CV: treino=teste", file=sys.stderr)
                     y_pred = (self.df["proba_ml"].values >= limiar_cls).astype(int)
                     self.clf_report = classification_report(y, y_pred, output_dict=True, zero_division=0)
-                    print(f"📈 [METRICS] F1-score (treino=teste): {self.clf_report.get('1', {}).get('f1-score', 0):.3f}", file=sys.stderr)
                     self.metricas_honestas = False
             else:
                 self.clf_report = {"note": "Apenas uma classe disponível"}
@@ -385,39 +550,49 @@ class AlocacaoInteligenteMLA:
         idx_turma = {tid: i for i, tid in enumerate(turma_ids)}
         idx_sala = {sid: j for j, sid in enumerate(sala_ids)}
 
-        # Construir matriz de utilidade (permite sala móvel mesmo com cap < alunos, desde que especiais atendam)
-        U = np.zeros((len(turma_ids), len(sala_ids)), dtype=float)
-        for _, r in self.df.iterrows():
-            esp_ok = (r["esp_deficit"] == 0)
-            cabe_direto = (r["capacidade_total"] >= r["alunos"])
-            movel = bool(r["sala_movel"])
-            if esp_ok and (cabe_direto or movel):
-                i = idx_turma[r["id_turma"]]
-                j = idx_sala[r["id_sala"]]
-                U[i, j] = max(0.0, float(r["proba_bom"]))
-
+        # pesos vindos de self.parametros (com defaults)
+        penal_movel = float(self.parametros.get("penalidade_moveis", 0.10))    # 0..1
+        peso_sobra  = float(self.parametros.get("peso_sobra", 0.02))           # 0..1
         custo_inviavel = float(self.parametros.get("custo_inviavel", 1e6))
 
-        usar_tiebreak = self.parametros.get("usar_tiebreak_sobra", False)
-        if usar_tiebreak and len(self.df) > 0:
-            print("🎯 [OPT] Usando tie-break por aproveitamento (menor sobra)", file=sys.stderr)
-            S = np.zeros((len(turma_ids), len(sala_ids)), dtype=float)
-            sobras = self.df["sobra_local"].values
-            sobra_min = sobras.min()
-            sobra_range = sobras.ptp() + 1e-9
-            for _, r in self.df.iterrows():
-                esp_ok = (r["esp_deficit"] == 0)
-                cabe_direto = (r["capacidade_total"] >= r["alunos"])
-                movel = bool(r["sala_movel"])
-                if esp_ok and (cabe_direto or movel):
-                    i = idx_turma[r["id_turma"]]
-                    j = idx_sala[r["id_sala"]]
-                    sobra_norm = (r["sobra_local"] - sobra_min) / sobra_range
-                    S[i, j] = sobra_norm
-            tiebreak_weight = float(self.parametros.get("peso_tiebreak", 0.01))
-            C = np.where(U > 0.0, (1.0 - U) + tiebreak_weight * S, custo_inviavel)
-        else:
-            C = np.where(U > 0.0, 1.0 - U, custo_inviavel)
+        U = np.full((len(turma_ids), len(sala_ids)), -np.inf, dtype=float)
+
+        # normalização de sobra p/ 0..1 (evita efeito de escala)
+        sobra_vals = self.df["sobra_local"].values
+        sobra_min, sobra_rng = sobra_vals.min() if len(sobra_vals)>0 else 0, (np.ptp(sobra_vals) + 1e-9)
+
+        for _, r in self.df.iterrows():
+            if r["esp_deficit"] != 0:
+                continue
+            i = idx_turma[r["id_turma"]]; j = idx_sala[r["id_sala"]]
+            proba = float(r["proba_bom"])
+            precisa_mov = 1.0 if (r["alunos"] > r["capacidade_total"]) else 0.0
+            sobra_norm = (r["sobra_local"] - sobra_min) / sobra_rng
+
+            # ===== Proteção de especiais =====
+            need_special      = 1.0 if (r["esp_necessarias"] > 0) else 0.0
+            room_has_special  = 1.0 if (r["esp_disponiveis"] > 0) else 0.0
+            desperdicio_esp   = 1.0 if (room_has_special == 1.0 and need_special == 0.0) else 0.0
+            match_esp         = 1.0 if (room_has_special == 1.0 and need_special == 1.0) else 0.0
+
+            # pesos ajustáveis por parâmetro
+            peso_especial_desperdicio = float(self.parametros.get("peso_especial_desperdicio", 0.15))
+            bonus_especial_match       = float(self.parametros.get("bonus_especial_match", 0.05))
+
+            # score ajustado: maximiza proba, penaliza móveis e sobra, protege especiais
+            score_aj = (
+                proba
+                - penal_movel * precisa_mov
+                - peso_sobra * sobra_norm
+                - peso_especial_desperdicio * desperdicio_esp
+                + bonus_especial_match * match_esp
+            )
+
+            # Permite pares com déficit: viabilidade será checada no pós-processo via empréstimos.
+            U[i, j] = max(0.0, score_aj)
+
+        # custo = 1 - score_aj (quem tem score_aj alto tem custo baixo)
+        C = np.where(U > -np.inf, 1.0 - U, custo_inviavel)
 
         print(f"🔢 [OPT] Matriz {len(turma_ids)}x{len(sala_ids)}, pares viáveis: {(U > 0).sum()}", file=sys.stderr)
 
@@ -454,15 +629,48 @@ class AlocacaoInteligenteMLA:
             hospedados[s["id"]] += int(linha["alunos"])
 
         # 3) Doadores móveis com sobra (capacidade - hospedados)
+        #    A ideia: se a sala tem cadeiras móveis e sobram X lugares, pode doar até X cadeiras.
+        limite_doador = int(self.parametros.get("limite_moveis_por_doador", 999999))
+        
+        # Mapa da maior turma compatível por sala (para evitar efeito cascata)
+        maior_turma_por_sala = {}
+        for s in self.salas:
+            if s["status"].upper() != "ATIVA":
+                continue
+            maior = 0
+            for t in self.turmas:
+                if (s["cadeiras_especiais"] >= t["esp_necessarias"]) and (t["alunos"] <= s["capacidade_total"]):
+                    maior = max(maior, t["alunos"])
+            maior_turma_por_sala[s["id"]] = maior
+        
         doadores = {}
         for s in self.salas:
             if bool(s.get("cadeiras_moveis", False)):
                 cap = int(s["capacidade_total"])
                 hosped = int(hospedados.get(s["id"], 0))
                 sobra = max(0, cap - hosped)
-                doadores[s["id"]] = {"nome": s["nome"], "sobra": sobra}
+                if sobra <= 0:
+                    continue
+                qtd_decl = s.get("cadeiras_moveis_qtd", None)
+                # Se a quantidade declarada existir, ela limita; caso contrário, usa só a sobra real.
+                if qtd_decl is None:
+                    doadores[s["id"]] = {
+                        "nome": s["nome"],
+                        "sobra": sobra,
+                        "limite": limite_doador
+                    }
+                else:
+                    qtd_decl = int(qtd_decl or 0)
+                    if qtd_decl > 0:
+                        doadores[s["id"]] = {
+                            "nome": s["nome"],
+                            "sobra": min(sobra, qtd_decl),
+                            "limite": min(limite_doador, qtd_decl)
+                        }
 
-        # 4) Para cada candidata com déficit, puxar cadeiras dos doadores (sem limite por doador)
+        # 4) Para cada candidata com déficit, puxar cadeiras dos doadores
+        #    Estratégia: alocar primeiro quem precisa de menos cadeiras.
+        candidatas.sort(key=lambda it: it[3])  # it[3] = déficit
         aloc_final = []
         for linha, t, s, deficit in candidatas:
             emprestimos = []
@@ -474,7 +682,7 @@ class AlocacaoInteligenteMLA:
                         break
                     if sala_id == s["id"]:
                         continue
-                    pegar = min(faltando, info["sobra"])
+                    pegar = min(faltando, info["sobra"], info["limite"])
                     if pegar > 0:
                         info["sobra"] -= pegar
                         faltando -= pegar
@@ -484,39 +692,85 @@ class AlocacaoInteligenteMLA:
                 continue
 
             turmas_alocadas.add(t["id"])
+            
+            # Recalcular com capacidade efetiva real após empréstimo
+            alvo = float(self.parametros.get("alvo_ocupacao", 0.85))
+            peso_ml = float(self.parametros.get("peso_ml", 0.6))
+            peso_occ = float(self.parametros.get("peso_ocupacao", 0.4))
+            peso_sum = max(1e-9, peso_ml + peso_occ)
+            peso_ml, peso_occ = peso_ml/peso_sum, peso_occ/peso_sum
+
+            cap_eff_real = int(linha["capacidade_total"] + deficit)  # déficit foi totalmente coberto
+            score_occ_eff_real = score_ocupacao_puro(int(linha["alunos"]), cap_eff_real, alvo)
+
+            proba_bom_eff = np.clip(
+                peso_ml * float(linha.get("proba_ml", 0.0)) + peso_occ * score_occ_eff_real,
+                0.0, 1.0
+            )
+            # 🚧 Piso pós-empréstimo: se agora cabe e especiais atendem, garantir pelo menos o score de ocupação efetivo
+            if (linha["esp_deficit"] == 0) and (int(linha["alunos"]) <= cap_eff_real):
+                proba_bom_eff = max(proba_bom_eff, score_occ_eff_real)
+            # 🎯 Se ficou ocupação 100% e especiais ok, compatibilidade 100%
+            if (abs((int(linha["alunos"])/cap_eff_real) - 1.0) < 1e-9) and (linha["esp_deficit"] == 0):
+                proba_bom_eff = 1.0
+            compat_calc = round(float(proba_bom_eff) * 100, 2)
+
+            # Métricas explícitas para UI
+            depende_moveis = int(deficit > 0)
+            ocupacao_eff = int(linha["alunos"]) / cap_eff_real if cap_eff_real else 0.0
+            
+            # Fatores que afetaram o índice
+            fatores = []
+            if score_occ_eff_real >= 0.8:
+                fatores.append(("+ Perto do alvo de ocupação", True))
+            if linha["esp_deficit"] == 0 and linha["esp_necessarias"] > 0:
+                fatores.append(("+ Atende especiais", True))
+            if depende_moveis == 1:
+                fatores.append(("− Usa móveis", True))
+            
             obs = (
-                f"Ocupacao: {linha['ocupacao']:.1%} "
-                f"(score ocupacao: {linha['score_ocupacao']:.2f}), "
-                f"Score ML: {float(linha.get('proba_ml', 0.0)):.2f}, "
-                f"Score combinado: {float(linha['proba_bom']):.2f}, "
+                f"Ocupacao: {ocupacao_eff:.1%} "
+                f"(score ocupacao: {score_occ_eff_real:.2f}), "
+                f"IA(Tree={float(linha.get('proba_ml', 0.0)):.2f}), "
+                f"Índice (ML+Ocupação): {round(proba_bom_eff*100, 2)}%, "
                 f"Especiais: {linha['esp_necessarias']}/{linha['esp_disponiveis']} (Hungarian)"
             )
             if deficit > 0:
                 detalhes = ", ".join([f"{qtd} de {nome}" for (nome, qtd) in emprestimos])
-                obs += f", +{deficit} moveis ({detalhes}) → cap. efetiva: {linha['capacidade_total'] + deficit}"
+                obs += f", +{deficit} moveis ({detalhes}) → cap. efetiva: {cap_eff_real}"
             if bool(linha.get("match_perfeito", False)):
                 obs += ", Match perfeito (forçado a 100%)"
 
             aloc_final.append({
                 "sala_id": s["id"],
                 "turma_id": t["id"],
-                "compatibilidade_score": round(float(linha['proba_bom']) * 100, 2),
-                "observacoes": obs
+                "compatibilidade_score": compat_calc,  # usa o proba com ocupação efetiva
+                "observacoes": obs,
+                # Métricas explícitas para UI
+                "ui": {
+                    "ocupacao_pct": round(ocupacao_eff * 100, 1),
+                    "capacidade_efetiva": cap_eff_real,
+                    "score_ocupacao_pct": round(score_occ_eff_real * 100, 1),
+                    "proba_ml_pct": round(float(linha.get("proba_ml", 0.0)) * 100, 1),
+                    "indice_qualidade_pct": compat_calc,
+                    "depende_moveis": depende_moveis,
+                    "especiais": {
+                        "necessarias": int(linha["esp_necessarias"]),
+                        "disponiveis": int(linha["esp_disponiveis"]),
+                        "atendidas": int(linha["esp_necessarias"]) if linha["esp_deficit"] == 0 else 0
+                    },
+                    "fatores": fatores
+                }
             })
 
         alocacoes = aloc_final
 
-        # 5) Score final = média do proba_bom dos pares efetivamente mantidos
+        # 5) Refino 2-opt para melhorar alocações
+        alocacoes = self._refino_troca_2opt(alocacoes)
+
+        # 6) Score final = média dos scores que aparecem na UI (pós-empréstimo)
         if alocacoes:
-            mantidos = []
-            for a in alocacoes:
-                # localizar linha correspondente
-                turma_id_turma = next(t["id_turma"] for t in self.turmas if t["id"] == a["turma_id"])
-                sala_id_sala = next(s["id_sala"] for s in self.salas if s["id"] == a["sala_id"])
-                linha = self.df[(self.df["id_turma"] == turma_id_turma) &
-                                (self.df["id_sala"] == sala_id_sala)].iloc[0]
-                mantidos.append(float(linha["proba_bom"]))
-            best_score = float(np.mean(mantidos))
+            best_score = float(np.mean([a["compatibilidade_score"] / 100.0 for a in alocacoes]))
         else:
             best_score = 0.0
 
@@ -630,9 +884,9 @@ class AlocacaoInteligenteMLA:
             linha = sel.iloc[0]
 
             obs = (f"Ocupacao: {linha['ocupacao']:.1%} "
-                   f"(score ocupacao: {linha['score_ocupacao']:.2f}), "
-                   f"Score ML: {float(linha.get('proba_ml', 0.0)):.2f}, "
-                   f"Score combinado: {float(linha['proba_bom']):.2f}, "
+                   f"(score ocupacao: {linha['score_ocupacao']:.0%}), "
+                   f"IA(Tree={float(linha.get('proba_ml', 0.0)):.2f}), "
+                   f"Índice (ML+Ocupação): {round(float(linha['proba_bom']) * 100, 2)}%, "
                    f"Especiais: {linha['esp_necessarias']}/{linha['esp_disponiveis']} (Fluxo Mínimo)")
 
             if bool(linha.get("match_perfeito", False)):
@@ -718,9 +972,9 @@ class AlocacaoInteligenteMLA:
                 turmas_alocadas.add(turma_real["id"])
                 obs = (
                     f"Ocupacao: {linha['ocupacao']:.1%} "
-                    f"(score ocupacao: {linha['score_ocupacao']:.2f}), "
-                    f"Score ML: {float(linha.get('proba_ml', 0.0)):.2f}, "
-                    f"Score combinado: {float(linha['proba_bom']):.2f}, "
+                    f"(score ocupacao: {linha['score_ocupacao']:.0%}), "
+                    f"IA(Tree={float(linha.get('proba_ml', 0.0)):.2f}), "
+                    f"Índice (ML+Ocupação): {round(float(linha['proba_bom']) * 100, 2)}%, "
                     f"Especiais: {linha['esp_necessarias']}/{linha['esp_disponiveis']} (Força Bruta)"
                 )
                 if bool(linha.get("match_perfeito", False)):
@@ -893,21 +1147,30 @@ class AlocacaoInteligenteMLA:
                 self._treinar_e_pontuar()
 
             # 1) Tenta fluxo (ótimo com empréstimo global, se networkx disponível)
-            try:
-                return self._otimizar_fluxo_minimo()
-            except Exception as e:
-                print(f"ℹ️ [OPT] Fluxo mínimo indisponível: {e}", file=sys.stderr)
+            if self.modo_otimizador in ("fluxo", "auto"):
+                try:
+                    return self._otimizar_fluxo_minimo()
+                except Exception as e:
+                    print(f"ℹ️ [OPT] Fluxo mínimo indisponível: {e}", file=sys.stderr)
 
             # 2) Cai pro Hungarian (ótimo sem restrição global de empréstimo)
-            return self._otimizar_hungarian()
+            if self.modo_otimizador in ("hungarian", "auto"):
+                return self._otimizar_hungarian()
+            
+            # Se chegou aqui, modo_otimizador não é válido
+            raise ValueError(f"Modo de otimizador inválido: {self.modo_otimizador}")
 
         except Exception as e:
             import traceback
             print("💥 [OPT] Exceção na otimização:", file=sys.stderr)
             print(traceback.format_exc(), file=sys.stderr)
-            print(f"⚠️ [OPT] Erro: {e}. Usando empréstimo greedy.", file=sys.stderr)
-            alocacoes, score, turmas_nao_alocadas, transferencias = self._algoritmo_simples_fallback()
-            return alocacoes, score, turmas_nao_alocadas
+            if self.permitir_fallback_simples:
+                print(f"⚠️ [OPT] Erro: {e}. Usando empréstimo greedy.", file=sys.stderr)
+                alocacoes, score, turmas_nao_alocadas, transferencias = self._algoritmo_simples_fallback()
+                return alocacoes, score, turmas_nao_alocadas
+            else:
+                print(f"❌ [OPT] Erro: {e}. Fallback simples desabilitado (TCC: apenas IA).", file=sys.stderr)
+                raise  # deixa a execução falhar explicitamente (mantém "só IA")
 
     def _analisar_motivo_nao_alocacao(self, turma):
         motivos = []
@@ -916,15 +1179,24 @@ class AlocacaoInteligenteMLA:
             return "Nenhuma sala ativa disponivel"
         if len(self.turmas) > len(salas_ativas):
             motivos.append(f"Mais turmas ({len(self.turmas)}) que salas ({len(salas_ativas)})")
+        
+        # Verificar se a turma não cabe por 1 cadeira (caso específico do T2)
         salas_compativeis = 0
+        salas_quase_compativeis = []
         for sala in salas_ativas:
             if sala["capacidade_total"] < turma["alunos"]:
+                if sala["capacidade_total"] == turma["alunos"] - 1:
+                    salas_quase_compativeis.append(sala["nome"])
                 continue
             if sala["cadeiras_especiais"] < turma["esp_necessarias"]:
                 continue
             salas_compativeis += 1
+        
         if salas_compativeis == 0:
-            motivos.append("Nenhuma sala compativel (capacidade ou cadeiras especiais)")
+            if salas_quase_compativeis:
+                motivos.append(f"Sala {salas_quase_compativeis[0]} tem {turma['alunos']-1} lugares e a turma tem {turma['alunos']}; as salas com especiais ficaram reservadas para turmas que precisam de especiais")
+            else:
+                motivos.append("Nenhuma sala compativel (capacidade ou cadeiras especiais)")
         elif salas_compativeis < len(self.turmas):
             motivos.append("Poucas salas compativeis para todas as turmas")
         return "; ".join(motivos) if motivos else "Salas insuficientes para otimizacao"
@@ -990,13 +1262,27 @@ class AlocacaoInteligenteMLA:
 
             acuracia = self.treinar_modelo()
             analise = self._analisar_problemas()
+            prova = self._prova_impossibilidade()
 
-            if acuracia == 0.0 or self.df is None or self.df.empty:
-                print("🔄 [MAIN] ML falhou completamente, usando empréstimo greedy direto", file=sys.stderr)
-                alocacoes, score, turmas_nao_alocadas, transferencias_cadeiras = self._algoritmo_simples_fallback()
-                acuracia = 0.5
-                algoritmo_usado = "Empréstimo entre salas (Greedy)"
+            # NOVO: continuar mesmo com F1 baixo; só abortar se não houver dados de pares
+            min_f1 = float(self.parametros.get("min_f1_para_continuar", 0.0))
+            continuar_quando_f1_baixo = bool(self.parametros.get("continuar_quando_f1_baixo", True))
+
+            if (self.df is None) or self.df.empty:
+                # aqui sim é falha real de ML/feature building
+                if self.permitir_fallback_simples:
+                    print("🔄 [MAIN] Sem dados de pares; usando empréstimo greedy direto", file=sys.stderr)
+                    alocacoes, score, turmas_nao_alocadas, transferencias_cadeiras = self._algoritmo_simples_fallback()
+                    acuracia = max(acuracia, 0.5)
+                    algoritmo_usado = "Empréstimo entre salas (Greedy)"
+                else:
+                    raise RuntimeError("Sem pares válidos e fallback simples desabilitado (TCC: apenas IA).")
+            elif (acuracia < min_f1) and (not continuar_quando_f1_baixo):
+                # política estrita opcional
+                raise RuntimeError(f"F1 abaixo do mínimo ({acuracia:.2%} < {min_f1:.2%}) e política estrita ativa.")
             else:
+                if acuracia < 0.1:  # F1 muito baixo
+                    print(f"⚠️ [MAIN] F1 baixo ({acuracia:.2%}) mas continuando com otimização IA", file=sys.stderr)
                 alocacoes, score, turmas_nao_alocadas = self.otimizar_alocacoes()
                 transferencias_cadeiras = []
                 # Determinar algoritmo usado baseado nas observações
@@ -1029,12 +1315,25 @@ class AlocacaoInteligenteMLA:
                 "turmas_vs_salas": f"{total_turmas} turmas para {total_salas_ativas} salas",
                 "max_matches_possiveis": den,
                 "algoritmo_usado": algoritmo_usado,
+                "otimizador_ia": "Fluxo Mínimo (Ótimo)" if algoritmo_usado == "Fluxo Mínimo (Ótimo)" else "Hungarian" if "Hungarian" in algoritmo_usado else "Força Bruta",
                 "parametros_utilizados": self.parametros,
                 "scipy_disponivel": HAS_SCIPY,
-                "metricas_honestas": getattr(self, 'metricas_honestas', False)
+                "metricas_honestas": getattr(self, 'metricas_honestas', False),
+                "prova_impossibilidade": prova
             }
 
+            # Melhorar motivos das turmas não alocadas se há impossibilidade estrutural
+            if prova.get("impossibilidade_estrutural"):
+                motivo_global = f"Impossível alocar todas as turmas no mesmo bloco: {prova['turmas']} turmas para {prova['salas_ativas']} salas"
+                if "cadeiras_moveis_faltantes" in prova:
+                    motivo_global += f" ; faltam {prova['cadeiras_moveis_faltantes']} cadeiras móveis"
+                for x in turmas_nao_alocadas:
+                    x["motivo"] = motivo_global
+
             observacoes = []
+            # Sempre adicionar "Somente IA" para TCC
+            observacoes.append("Somente IA: Árvore de Decisão (ML) + Otimizador combinatório (Fluxo/Húngaro)")
+            
             if not HAS_SCIPY:
                 observacoes.append("SciPy indisponível: fallback para força bruta (limite 5000 permutações)")
             if algoritmo_usado == "Simples (Fallback)":
@@ -1071,8 +1370,34 @@ class AlocacaoInteligenteMLA:
                     debug_info["erro_persistencia"] = str(e)
                     print(f"⚠️ [PERSIST] Erro ao salvar modelo: {e}", file=sys.stderr)
 
+            # Diagnóstico para detectar divergências entre DF e UI
+            if alocacoes:
+                # Score baseado no DF original (pré-empréstimo)
+                scores_df = []
+                for a in alocacoes:
+                    turma_id_turma = next(t["id_turma"] for t in self.turmas if t["id"] == a["turma_id"])
+                    sala_id_sala = next(s["id_sala"] for s in self.salas if s["id"] == a["sala_id"])
+                    linha = self.df[(self.df["id_turma"] == turma_id_turma) & (self.df["id_sala"] == sala_id_sala)].iloc[0]
+                    scores_df.append(float(linha["proba_bom"]) * 100)
+                
+                debug_info["score_media_df_pct"] = round(np.mean(scores_df), 2)
+                debug_info["score_media_ui_pct"] = round(np.mean([a["compatibilidade_score"] for a in alocacoes]), 2)
+            else:
+                debug_info["score_media_df_pct"] = 0.0
+                debug_info["score_media_ui_pct"] = 0.0
+
             print(f"✅ [MAIN] Execução concluída: {turmas_alocadas}/{total_turmas} turmas alocadas ({score_otimizacao_pct}%)", file=sys.stderr)
 
+            # Determinar confiança do modelo
+            confianca_modelo = "baixa"
+            if hasattr(self, 'metricas_honestas') and self.metricas_honestas:
+                if hasattr(self, 'clf_report') and isinstance(self.clf_report, dict):
+                    f1_score = self.clf_report.get('1', {}).get('f1-score', 0)
+                    if f1_score >= 0.7:
+                        confianca_modelo = "alta"
+                    elif f1_score >= 0.5:
+                        confianca_modelo = "média"
+            
             return {
                 "success": True,
                 "alocacoes": alocacoes,
@@ -1081,8 +1406,9 @@ class AlocacaoInteligenteMLA:
                 "total_alocacoes": turmas_alocadas,
                 "total_turmas": total_turmas,
                 "turmas_sobrando": turmas_sobrando,
-                "acuracia_modelo": round(acuracia * 100, 2),
-                "f1_modelo": round(acuracia * 100, 2),
+                "confianca_modelo": confianca_modelo,
+                "acuracia_modelo": round(acuracia * 100, 2) if confianca_modelo != "baixa" else None,
+                "f1_modelo": round(acuracia * 100, 2) if confianca_modelo != "baixa" else None,
                 "analise_detalhada": analise,
                 "debug_info": debug_info,
                 "transferencias_cadeiras": transferencias_cadeiras

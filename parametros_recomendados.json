@@ -1,0 +1,23 @@
+{
+  "alvo_ocupacao": 0.85,
+  "peso_ml": 0.6,
+  "peso_ocupacao": 0.4,
+  "limiar_cls": 0.5,
+  "gridsearch": true,
+  "metricas_cv": false,
+  "continuar_quando_f1_baixo": true,
+  "min_f1_para_continuar": 0.0,
+  "permitir_moveis_no_ml": true,
+  "deficit_moveis_viavel": 3,
+  "usar_tiebreak_sobra": false,
+  "peso_tiebreak": 0.0,
+  "penalidade_moveis": 0.05,
+  "peso_sobra": 0.02,
+  "peso_especial_desperdicio": 0.2,
+  "bonus_especial_match": 0.08,
+  "limite_moveis_por_doador": 999999,
+  "forcar_otimizador": "hungarian",
+  "permitir_fallback_simples": false,
+  "parallel_ml": false,
+  "dump_arvore": false
+}

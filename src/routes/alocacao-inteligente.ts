@@ -124,10 +124,14 @@ router.post('/:alocacao_id', async (req, res) => {
         // Salvar novo resultado no banco
         const resultadoSalvo = await prisma.resultadoAlocacaoHorario.create({
           data: {
-            alocacao_id: alocacao_id,
-            horario_id: horario.id,
+            alocacao: {
+              connect: { id: alocacao_id }
+            },
+            horario: {
+              connect: { id: horario.id }
+            },
             score_otimizacao: resultadoPython.score_otimizacao,
-            acuracia_modelo: resultadoPython.acuracia_modelo,
+            acuracia_modelo: resultadoPython.acuracia_modelo || 0,
             total_turmas: resultadoPython.total_turmas || 0,
             turmas_alocadas: resultadoPython.total_alocacoes || 0,
             turmas_sobrando: resultadoPython.turmas_sobrando || 0,

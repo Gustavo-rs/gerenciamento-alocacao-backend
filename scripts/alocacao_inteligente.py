@@ -904,18 +904,22 @@ class AlocacaoInteligenteMLA:
         SRC, SNK = "SRC", "SNK"
         G.add_node(SRC); G.add_node(SNK)
 
-        # Nós de turmas (demanda = alunos)
+        # Nós de turmas (sem demanda individual)
         for t in turmas:
             tn = f"T:{t['id_turma']}"
-            G.add_node(tn, demand=-int(t["alunos"]))  # demanda negativa = precisa receber fluxo
-            G.add_edge(SRC, tn, capacity=int(t["alunos"]), weight=0)
+            G.add_node(tn)  # sem demand em T
+            G.add_edge(SRC, tn, capacity=1, weight=0)  # 1 unidade por turma
 
-        # Nós de salas (oferta = capacidade fixa)
+        # Nós de salas (sem demanda individual) 
         for s in salas:
             sn = f"S:{s['id_sala']}"
-            G.add_node(sn, demand=0)
-            # oferta base: capacidade_total
-            G.add_edge(sn, SNK, capacity=int(s["capacidade_total"]), weight=0)
+            G.add_node(sn)  # sem demand em S
+            G.add_edge(sn, SNK, capacity=1, weight=0)  # 1 turma por sala
+
+        # Demanda global: forçar exatamente m = min(turmas, salas) matches
+        m = min(len(turmas), len(salas))
+        G.nodes[SRC]["demand"] = -m
+        G.nodes[SNK]["demand"] = +m
 
         # Arestas turma->sala com "benefício" = proba_bom; usamos custo = -benefício*1e4 + tie-break
         # E permitimos exceder capacidade via "cadeiras emprestadas" por um nó DONATION,
@@ -941,26 +945,42 @@ class AlocacaoInteligenteMLA:
                 continue
             benefit = float(r["proba_bom"])
             sobra   = int(max(0, r["capacidade_total"] - r["alunos"]))
+            
+            # Penalizações e bonificações (como no Hungarian)
+            penal_movel = float(self.parametros.get("penalidade_moveis", 0.10))
+            peso_especial_desperdicio = float(self.parametros.get("peso_especial_desperdicio", 0.15))
+            bonus_especial_match = float(self.parametros.get("bonus_especial_match", 0.05))
+            
+            precisa_mov = 1 if (r["alunos"] > r["capacidade_total"]) else 0
+            need_special = 1 if (r["esp_necessarias"] > 0) else 0
+            room_has_special = 1 if (r["esp_disponiveis"] > 0) else 0
+            desperdicio_esp = 1 if (room_has_special and not need_special) else 0
+            match_esp = 1 if (room_has_special and need_special) else 0
+            
             # custo: mais negativo = melhor
-            cost = int(-benefit * BENEF_SCALE + TIE_W * max(0, r["sobra_local"]))
-            # permitimos fluxo até alunos da turma (o grafo cuidará do total)
-            G.add_edge(tn, sn, capacity=int(r["alunos"]), weight=cost)
+            cost = int(-benefit * BENEF_SCALE 
+                      + TIE_W * max(0, r["sobra_local"])
+                      + penal_movel * 1000 * precisa_mov
+                      + peso_especial_desperdicio * 1000 * desperdicio_esp
+                      - bonus_especial_match * 1000 * match_esp)
+            # Capacidade 1: garante 1 turma por sala
+            G.add_edge(tn, sn, capacity=1, weight=cost)
 
         # Rodar min-cost flow
         flow = nx.min_cost_flow(G)
 
-        # Reconstruir alocações: turma -> sala com maior fluxo
+        # Reconstruir alocações: turma -> sala com fluxo = 1
         alocacoes = []
         turmas_alocadas = set()
         for t in turmas:
             tn = f"T:{t['id_turma']}"
             if tn not in flow:
                 continue
-            # pega sala com maior fluxo
-            flows = [(sn, q) for sn, q in flow[tn].items() if sn.startswith("S:") and q>0]
+            # pega sala com fluxo = 1 (garante 1:1)
+            flows = [(sn, q) for sn, q in flow[tn].items() if sn.startswith("S:") and q == 1]
             if not flows:
                 continue
-            sn, q = max(flows, key=lambda x: x[1])
+            sn, _ = flows[0]  # só pode ter uma sala com fluxo 1
             sid = sn.split(":",1)[1]
             s = by_sid[sid]
 

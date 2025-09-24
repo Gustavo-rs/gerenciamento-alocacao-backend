@@ -34,6 +34,12 @@ try:
 except Exception:
     HAS_NX = False
 
+try:
+    import joblib
+    HAS_JOBLIB = True
+except Exception:
+    HAS_JOBLIB = False
+
 # Controle de aleatoriedade para reprodutibilidade total
 np.random.seed(42)
 
@@ -107,6 +113,12 @@ class AlocacaoInteligenteMLA:
         self.modelo_regras = None
         self.permitir_fallback_simples = bool(self.parametros.get("permitir_fallback_simples", False))
         self.modo_otimizador = self.parametros.get("forcar_otimizador", "auto")  # "fluxo" | "hungarian" | "auto"
+        
+        # RN (rede neural) opcional
+        self.rn_model_path = self.parametros.get("rn_model_path")
+        self.peso_rn = float(self.parametros.get("peso_rn", 0.30))
+        self.rn_pipe = None
+        self.rn_feature_cols = None
 
     def _normalize_salas(self, salas):
         normalized = []
@@ -263,6 +275,50 @@ class AlocacaoInteligenteMLA:
         w += 0.3 * np.maximum(0.0, 1 - np.minimum(np.abs(occ - alvo) / max(alvo, 1e-9), 1))
 
         return np.clip(w, 0.1, 3.0)
+
+    def _rn_load_if_needed(self):
+        if self.rn_pipe is not None:
+            return
+        if not self.rn_model_path:
+            return
+        if not HAS_JOBLIB:
+            print("⚠️ [RN] joblib indisponível; RN desativada.", file=sys.stderr)
+            return
+        try:
+            bundle = joblib.load(self.rn_model_path)
+            self.rn_pipe = bundle.get("pipeline", None)
+            self.rn_feature_cols = bundle.get("feature_cols", [])
+            if self.rn_pipe is None or not self.rn_feature_cols:
+                print("⚠️ [RN] Modelo inválido (faltam pipeline/feature_cols).", file=sys.stderr)
+                self.rn_pipe = None
+                self.rn_feature_cols = None
+            else:
+                print(f"🧠 [RN] Carregado: {self.rn_model_path} | features: {self.rn_feature_cols}", file=sys.stderr)
+        except Exception as e:
+            print(f"⚠️ [RN] Falha ao carregar modelo: {e}", file=sys.stderr)
+            self.rn_pipe = None
+            self.rn_feature_cols = None
+
+    def _aplicar_rn(self):
+        """Gera self.df['proba_rn'] se modelo RN estiver disponível."""
+        self._rn_load_if_needed()
+        if self.rn_pipe is None or not self.rn_feature_cols or self.df is None or self.df.empty:
+            return
+        # RN espera coluna 'sobra' (nosso DF tem 'sobra_local')
+        df_feat = self.df.copy()
+        if "sobra_local" in df_feat.columns and "sobra" in self.rn_feature_cols:
+            df_feat["sobra"] = df_feat["sobra_local"]
+        # garantir todas as colunas
+        for col in self.rn_feature_cols:
+            if col not in df_feat.columns:
+                df_feat[col] = 0.0
+        try:
+            X = df_feat[self.rn_feature_cols].astype(float).values
+            proba = self.rn_pipe.predict_proba(X)[:, 1]
+            self.df["proba_rn"] = np.clip(proba, 0.0, 1.0)
+            print(f"✅ [RN] Probabilidades geradas p/ {len(proba)} pares.", file=sys.stderr)
+        except Exception as e:
+            print(f"⚠️ [RN] Erro ao prever: {e}", file=sys.stderr)
 
     def _refino_troca_2opt(self, alocacoes):
         """Refino local 2-opt: tenta trocar pares de alocações para melhorar o score total"""
@@ -453,18 +509,39 @@ class AlocacaoInteligenteMLA:
         # ---- prob final do ML (só árvore) ----
         self.df["proba_ml"] = np.clip(tree_proba, 0.0, 1.0)
 
-        # ---- combinação com score de ocupação ----
-        self.df["proba_bom"] = np.clip(
-            peso_ml * self.df["proba_ml"].values + peso_occ * self.df["score_ocupacao"].values,
-            0.0, 1.0
+        # ---- RN opcional: gera proba_rn ----
+        self._aplicar_rn()  # cria self.df['proba_rn'] se houver modelo
+
+        # ---- combinação com score de ocupação (+ RN, se existir) ----
+        p = self.parametros
+        peso_ml  = float(p.get("peso_ml", 0.45))
+        peso_occ = float(p.get("peso_ocupacao", 0.25))
+        peso_rn  = float(p.get("peso_rn", 0.30)) if "proba_rn" in self.df.columns else 0.0
+
+        total = max(1e-9, peso_ml + peso_occ + peso_rn)
+        peso_ml  /= total
+        peso_occ /= total
+        peso_rn  /= total
+
+        combo = (
+            peso_ml  * self.df["proba_ml"].values +
+            peso_occ * self.df["score_ocupacao"].values
         )
-        # 🚧 Regra de negócio: se cabe sem déficit e especiais atendem, não deixar o ML derrubar.
+        if "proba_rn" in self.df.columns:
+            combo += peso_rn * self.df["proba_rn"].values
+
+        self.df["proba_bom"] = np.clip(combo, 0.0, 1.0)
+
+        # 🚧 Piso: se cabe sem déficit e especiais ok, não deixar cair abaixo do score de ocupação
         cond_sem_deficit = (self.df["deficit"] == 0) & (self.df["esp_deficit"] == 0)
         self.df.loc[cond_sem_deficit, "proba_bom"] = np.maximum(
             self.df.loc[cond_sem_deficit, "proba_bom"],
             self.df.loc[cond_sem_deficit, "score_ocupacao"]
         )
-        print(f"✅ [ML] Combinação: ML({peso_ml:.1%}) + Ocupação({peso_occ:.1%})", file=sys.stderr)
+        if "proba_rn" in self.df.columns:
+            print(f"✅ [ML] Combinação: ML({peso_ml:.1%}) + Ocupação({peso_occ:.1%}) + RN({peso_rn:.1%})", file=sys.stderr)
+        else:
+            print(f"✅ [ML] Combinação: ML({peso_ml:.1%}) + Ocupação({peso_occ:.1%})", file=sys.stderr)
 
         # ---- boost para match perfeito ----
         mask_perfeito = (
@@ -697,8 +774,10 @@ class AlocacaoInteligenteMLA:
             alvo = float(self.parametros.get("alvo_ocupacao", 0.85))
             peso_ml = float(self.parametros.get("peso_ml", 0.6))
             peso_occ = float(self.parametros.get("peso_ocupacao", 0.4))
-            peso_sum = max(1e-9, peso_ml + peso_occ)
-            peso_ml, peso_occ = peso_ml/peso_sum, peso_occ/peso_sum
+            peso_rn = float(self.parametros.get("peso_rn", 0.0)) if "proba_rn" in self.df.columns else 0.0
+            
+            peso_sum = max(1e-9, peso_ml + peso_occ + peso_rn)
+            peso_ml, peso_occ, peso_rn = peso_ml/peso_sum, peso_occ/peso_sum, peso_rn/peso_sum
 
             cap_eff_real = int(linha["capacidade_total"] + deficit)  # déficit foi totalmente coberto
             score_occ_eff_real = score_ocupacao_puro(int(linha["alunos"]), cap_eff_real, alvo)
@@ -707,6 +786,10 @@ class AlocacaoInteligenteMLA:
                 peso_ml * float(linha.get("proba_ml", 0.0)) + peso_occ * score_occ_eff_real,
                 0.0, 1.0
             )
+            # Incluir RN se disponível
+            if "proba_rn" in self.df.columns:
+                proba_bom_eff += peso_rn * float(linha.get("proba_rn", 0.0))
+                proba_bom_eff = np.clip(proba_bom_eff, 0.0, 1.0)
             # 🚧 Piso pós-empréstimo: se agora cabe e especiais atendem, garantir pelo menos o score de ocupação efetivo
             if (linha["esp_deficit"] == 0) and (int(linha["alunos"]) <= cap_eff_real):
                 proba_bom_eff = max(proba_bom_eff, score_occ_eff_real)
@@ -728,11 +811,15 @@ class AlocacaoInteligenteMLA:
             if depende_moveis == 1:
                 fatores.append(("− Usa móveis", True))
             
+            # Determinar se RN está ativa para o texto
+            tem_rn = "proba_rn" in self.df.columns
+            indice_texto = "Índice (ML+RN+Ocupação)" if tem_rn else "Índice (ML+Ocupação)"
+            
             obs = (
                 f"Ocupacao: {ocupacao_eff:.1%} "
                 f"(score ocupacao: {score_occ_eff_real:.2f}), "
                 f"IA(Tree={float(linha.get('proba_ml', 0.0)):.2f}), "
-                f"Índice (ML+Ocupação): {round(proba_bom_eff*100, 2)}%, "
+                f"{indice_texto}: {round(proba_bom_eff*100, 2)}%, "
                 f"Especiais: {linha['esp_necessarias']}/{linha['esp_disponiveis']} (Hungarian)"
             )
             if deficit > 0:
@@ -883,10 +970,14 @@ class AlocacaoInteligenteMLA:
                 continue
             linha = sel.iloc[0]
 
+            # Determinar se RN está ativa para o texto
+            tem_rn = "proba_rn" in self.df.columns
+            indice_texto = "Índice (ML+RN+Ocupação)" if tem_rn else "Índice (ML+Ocupação)"
+            
             obs = (f"Ocupacao: {linha['ocupacao']:.1%} "
                    f"(score ocupacao: {linha['score_ocupacao']:.0%}), "
                    f"IA(Tree={float(linha.get('proba_ml', 0.0)):.2f}), "
-                   f"Índice (ML+Ocupação): {round(float(linha['proba_bom']) * 100, 2)}%, "
+                   f"{indice_texto}: {round(float(linha['proba_bom']) * 100, 2)}%, "
                    f"Especiais: {linha['esp_necessarias']}/{linha['esp_disponiveis']} (Fluxo Mínimo)")
 
             if bool(linha.get("match_perfeito", False)):
@@ -970,11 +1061,15 @@ class AlocacaoInteligenteMLA:
                 turma_real = next(t for t in self.turmas if t["id_turma"] == turma_ids[i])
                 sala_real = next(s for s in self.salas if s["id_sala"] == sala_ids[j])
                 turmas_alocadas.add(turma_real["id"])
+                # Determinar se RN está ativa para o texto
+                tem_rn = "proba_rn" in self.df.columns
+                indice_texto = "Índice (ML+RN+Ocupação)" if tem_rn else "Índice (ML+Ocupação)"
+                
                 obs = (
                     f"Ocupacao: {linha['ocupacao']:.1%} "
                     f"(score ocupacao: {linha['score_ocupacao']:.0%}), "
                     f"IA(Tree={float(linha.get('proba_ml', 0.0)):.2f}), "
-                    f"Índice (ML+Ocupação): {round(float(linha['proba_bom']) * 100, 2)}%, "
+                    f"{indice_texto}: {round(float(linha['proba_bom']) * 100, 2)}%, "
                     f"Especiais: {linha['esp_necessarias']}/{linha['esp_disponiveis']} (Força Bruta)"
                 )
                 if bool(linha.get("match_perfeito", False)):

@@ -11,7 +11,12 @@ const prisma = new PrismaClient();
 const AlocacaoParametrosSchema = z.object({
   priorizar_capacidade: z.boolean().default(true),
   priorizar_especiais: z.boolean().default(true),
-  priorizar_proximidade: z.boolean().default(true)
+  priorizar_proximidade: z.boolean().default(true),
+  // Parâmetros da RN (opcionais)
+  rn_model_path: z.string().optional(),
+  peso_rn: z.number().min(0).max(1).optional(),
+  peso_ml: z.number().min(0).max(1).optional(),
+  peso_ocupacao: z.number().min(0).max(1).optional()
 });
 
 // POST /api/alocacao-inteligente/:alocacao_id - Executar alocação inteligente para uma alocação principal
@@ -19,6 +24,16 @@ router.post('/:alocacao_id', async (req, res) => {
   try {
     const { alocacao_id } = req.params;
     const parametros = AlocacaoParametrosSchema.parse(req.body);
+
+    // Adicionar parâmetros da RN se não foram fornecidos
+    const parametrosCompletos = {
+      ...parametros,
+      // Parâmetros da RN (usar valores padrão se não fornecidos)
+      rn_model_path: parametros.rn_model_path || ".\\scripts\\modelo_rn.pkl",
+      peso_rn: parametros.peso_rn ?? 0.3,
+      peso_ml: parametros.peso_ml ?? 0.45,
+      peso_ocupacao: parametros.peso_ocupacao ?? 0.25
+    };
 
     console.log(`🚀 Iniciando alocação inteligente para alocação: ${alocacao_id}`);
 
@@ -102,7 +117,7 @@ router.post('/:alocacao_id', async (req, res) => {
       const resultadoPython = await executarAlgoritmoPython({
         salas: salasData,
         turmas: turmasData
-      }, parametros);
+      }, parametrosCompletos);
 
       if (resultadoPython.success) {
         // Verificar se já existe resultado para este horário e deletar se existir
@@ -135,9 +150,9 @@ router.post('/:alocacao_id', async (req, res) => {
             total_turmas: resultadoPython.total_turmas || 0,
             turmas_alocadas: resultadoPython.total_alocacoes || 0,
             turmas_sobrando: resultadoPython.turmas_sobrando || 0,
-            priorizar_capacidade: parametros.priorizar_capacidade,
-            priorizar_especiais: parametros.priorizar_especiais,
-            priorizar_proximidade: parametros.priorizar_proximidade,
+            priorizar_capacidade: parametrosCompletos.priorizar_capacidade,
+            priorizar_especiais: parametrosCompletos.priorizar_especiais,
+            priorizar_proximidade: parametrosCompletos.priorizar_proximidade,
             analise_detalhada: JSON.stringify(resultadoPython.analise_detalhada),
             debug_info: JSON.stringify(resultadoPython.debug_info || {}),
             turmas_nao_alocadas: JSON.stringify(resultadoPython.turmas_nao_alocadas || []),
@@ -186,9 +201,9 @@ router.post('/:alocacao_id', async (req, res) => {
               total_turmas: turmasData.length,
               turmas_alocadas: 0,
               turmas_sobrando: turmasData.length,
-              priorizar_capacidade: parametros.priorizar_capacidade,
-              priorizar_especiais: parametros.priorizar_especiais,
-              priorizar_proximidade: parametros.priorizar_proximidade,
+              priorizar_capacidade: parametrosCompletos.priorizar_capacidade,
+              priorizar_especiais: parametrosCompletos.priorizar_especiais,
+              priorizar_proximidade: parametrosCompletos.priorizar_proximidade,
               analise_detalhada: JSON.stringify({ erro: true, detalhes: resultadoPython.error }),
               debug_info: JSON.stringify(resultadoPython.diagnostico || {}),
               turmas_nao_alocadas: JSON.stringify(turmasData.map(t => ({

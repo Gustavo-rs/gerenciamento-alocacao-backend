@@ -1,7 +1,9 @@
 {
   "alvo_ocupacao": 0.85,
-  "peso_ml": 0.6,
-  "peso_ocupacao": 0.4,
+  "peso_ml": 0.45,
+  "peso_ocupacao": 0.25,
+  "peso_rn": 0.3,
+  "rn_model_path": ".\\scripts\\modelo_rn.pkl",
   "limiar_cls": 0.5,
   "gridsearch": true,
   "metricas_cv": false,
